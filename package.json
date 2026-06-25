@@ -1,0 +1,162 @@
+{
+  "name": "diffbranch",
+  "displayName": "DiffBranch",
+  "description": "Open every file that differs from another git branch.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "branchDiff.openAll",
+        "title": "Open All Files Changed vs Branch",
+        "category": "db"
+      },
+      {
+        "command": "branchDiff.openUnviewed",
+        "title": "Open Unviewed Files Changed vs Branch",
+        "category": "db"
+      },
+      {
+        "command": "branchDiff.openViewed",
+        "title": "Open Viewed Files Changed vs Branch",
+        "category": "db"
+      },
+      {
+        "command": "branchDiff.toggleViewed",
+        "title": "Toggle Viewed",
+        "category": "db"
+      },
+      {
+        "command": "branchDiff.markViewed",
+        "title": "Mark Viewed",
+        "category": "db",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "branchDiff.unmarkViewed",
+        "title": "Mark Unviewed",
+        "category": "db",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "branchDiff.clearViewed",
+        "title": "Clear Viewed Marks",
+        "category": "db"
+      },
+      { "command": "branchDiff.treePickBranch", "title": "Change Branch", "icon": "$(git-branch)" },
+      { "command": "branchDiff.treeRefresh", "title": "Refresh", "icon": "$(refresh)" },
+      { "command": "branchDiff.treeOpenUnviewed", "title": "Open All Unviewed", "icon": "$(eye)" },
+      { "command": "branchDiff.treeOpenFile", "title": "Open File", "icon": "$(go-to-file)" },
+      { "command": "branchDiff.treeOpenDiff", "title": "Open as Diff", "icon": "$(git-compare)" },
+      { "command": "branchDiff.treeToggleViewed", "title": "Toggle Viewed", "icon": "$(eye)" },
+      { "command": "branchDiff.treeIgnore", "title": "Untrack File", "icon": "$(circle-slash)" },
+      { "command": "branchDiff.treeUnignore", "title": "Track File", "icon": "$(check)" },
+      { "command": "branchDiff.treeMarkAllViewed", "title": "Mark All Viewed", "icon": "$(eye-closed)" },
+      { "command": "branchDiff.treeMarkAllUnviewed", "title": "Mark All Unviewed", "icon": "$(eye)" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "diffbranch", "title": "DiffBranch", "icon": "$(git-compare)" }
+      ]
+    },
+    "views": {
+      "diffbranch": [
+        { "id": "diffbranchView", "name": "Changed vs Branch" }
+      ]
+    },
+    "menus": {
+      "editor/title": [
+        {
+          "command": "branchDiff.markViewed",
+          "group": "navigation",
+          "when": "!diffbranch.activeViewed"
+        },
+        {
+          "command": "branchDiff.unmarkViewed",
+          "group": "navigation",
+          "when": "diffbranch.activeViewed"
+        }
+      ],
+      "view/title": [
+        { "command": "branchDiff.treeOpenUnviewed", "when": "view == diffbranchView", "group": "navigation@1" },
+        { "command": "branchDiff.treePickBranch", "when": "view == diffbranchView", "group": "navigation@2" },
+        { "command": "branchDiff.treeRefresh", "when": "view == diffbranchView", "group": "navigation@3" }
+      ],
+      "view/item/context": [
+        {
+          "command": "branchDiff.treeMarkAllViewed",
+          "when": "view == diffbranchView && viewItem == group-unviewed",
+          "group": "inline@1"
+        },
+        {
+          "command": "branchDiff.treeMarkAllUnviewed",
+          "when": "view == diffbranchView && viewItem == group-viewed",
+          "group": "inline@1"
+        },
+        {
+          "command": "branchDiff.treeToggleViewed",
+          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "inline@1"
+        },
+        {
+          "command": "branchDiff.treeOpenFile",
+          "when": "view == diffbranchView && viewItem =~ /^file-/",
+          "group": "inline@2"
+        },
+        {
+          "command": "branchDiff.treeIgnore",
+          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "inline@3"
+        },
+        {
+          "command": "branchDiff.treeUnignore",
+          "when": "view == diffbranchView && viewItem == file-ignored",
+          "group": "inline@3"
+        },
+        {
+          "command": "branchDiff.treeOpenDiff",
+          "when": "view == diffbranchView && viewItem =~ /^file-/",
+          "group": "navigation@1"
+        },
+        {
+          "command": "branchDiff.treeOpenFile",
+          "when": "view == diffbranchView && viewItem =~ /^file-/",
+          "group": "navigation@2"
+        },
+        {
+          "command": "branchDiff.treeToggleViewed",
+          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "navigation@3"
+        },
+        {
+          "command": "branchDiff.treeIgnore",
+          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "navigation@4"
+        },
+        {
+          "command": "branchDiff.treeUnignore",
+          "when": "view == diffbranchView && viewItem == file-ignored",
+          "group": "navigation@4"
+        }
+      ],
+      "commandPalette": [
+        { "command": "branchDiff.markViewed", "when": "false" },
+        { "command": "branchDiff.unmarkViewed", "when": "false" },
+        { "command": "branchDiff.treePickBranch", "when": "false" },
+        { "command": "branchDiff.treeRefresh", "when": "false" },
+        { "command": "branchDiff.treeOpenUnviewed", "when": "false" },
+        { "command": "branchDiff.treeOpenFile", "when": "false" },
+        { "command": "branchDiff.treeOpenDiff", "when": "false" },
+        { "command": "branchDiff.treeToggleViewed", "when": "false" },
+        { "command": "branchDiff.treeIgnore", "when": "false" },
+        { "command": "branchDiff.treeUnignore", "when": "false" },
+        { "command": "branchDiff.treeMarkAllViewed", "when": "false" },
+        { "command": "branchDiff.treeMarkAllUnviewed", "when": "false" }
+      ]
+    }
+  }
+}
