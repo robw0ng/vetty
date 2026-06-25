@@ -6,7 +6,7 @@
   "publisher": "local",
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Other"],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./extension.js",
   "contributes": {
     "commands": [
@@ -47,6 +47,8 @@
         "title": "Clear Viewed Marks",
         "category": "db"
       },
+      { "command": "branchDiff.reviewPr", "title": "Review Pull Request", "category": "db", "icon": "$(git-pull-request)" },
+      { "command": "branchDiff.finishReview", "title": "Finish Review (delete PR branch)", "category": "db", "icon": "$(trash)" },
       { "command": "branchDiff.treePickBranch", "title": "Change Branch", "icon": "$(git-branch)" },
       { "command": "branchDiff.treeRefresh", "title": "Refresh", "icon": "$(refresh)" },
       { "command": "branchDiff.treeOpenUnviewed", "title": "Open All Unviewed", "icon": "$(eye)" },
@@ -55,8 +57,12 @@
       { "command": "branchDiff.treeToggleViewed", "title": "Toggle Viewed", "icon": "$(eye)" },
       { "command": "branchDiff.treeIgnore", "title": "Untrack File", "icon": "$(circle-slash)" },
       { "command": "branchDiff.treeUnignore", "title": "Track File", "icon": "$(check)" },
+      { "command": "branchDiff.treeOpenGroup", "title": "Open All in Group", "icon": "$(go-to-file)" },
       { "command": "branchDiff.treeMarkAllViewed", "title": "Mark All Viewed", "icon": "$(eye-closed)" },
-      { "command": "branchDiff.treeMarkAllUnviewed", "title": "Mark All Unviewed", "icon": "$(eye)" }
+      { "command": "branchDiff.treeMarkAllUnviewed", "title": "Mark All Unviewed", "icon": "$(eye)" },
+      { "command": "branchDiff.exportComments", "title": "Export Comments to Clipboard", "category": "db", "icon": "$(copy)" },
+      { "command": "branchDiff.createComment", "title": "Add Comment" },
+      { "command": "branchDiff.deleteComment", "title": "Delete Comment", "icon": "$(trash)" }
     ],
     "viewsContainers": {
       "activitybar": [
@@ -65,7 +71,8 @@
     },
     "views": {
       "diffbranch": [
-        { "id": "diffbranchView", "name": "Changed vs Branch" }
+        { "type": "webview", "id": "diffbranchSearch", "name": "Search" },
+        { "id": "diffbranchView", "name": "Review" }
       ]
     },
     "menus": {
@@ -82,11 +89,18 @@
         }
       ],
       "view/title": [
-        { "command": "branchDiff.treeOpenUnviewed", "when": "view == diffbranchView", "group": "navigation@1" },
-        { "command": "branchDiff.treePickBranch", "when": "view == diffbranchView", "group": "navigation@2" },
-        { "command": "branchDiff.treeRefresh", "when": "view == diffbranchView", "group": "navigation@3" }
+        { "command": "branchDiff.reviewPr", "when": "view == diffbranchView", "group": "navigation@0" },
+        { "command": "branchDiff.finishReview", "when": "view == diffbranchView && diffbranch.reviewing", "group": "navigation@1" },
+        { "command": "branchDiff.exportComments", "when": "view == diffbranchView", "group": "navigation@2" },
+        { "command": "branchDiff.treePickBranch", "when": "view == diffbranchView", "group": "navigation@3" },
+        { "command": "branchDiff.treeRefresh", "when": "view == diffbranchView", "group": "navigation@4" }
       ],
       "view/item/context": [
+        {
+          "command": "branchDiff.treeOpenGroup",
+          "when": "view == diffbranchView && viewItem =~ /^group-/",
+          "group": "inline@0"
+        },
         {
           "command": "branchDiff.treeMarkAllViewed",
           "when": "view == diffbranchView && viewItem == group-unviewed",
@@ -143,6 +157,20 @@
           "group": "navigation@4"
         }
       ],
+      "comments/commentThread/context": [
+        {
+          "command": "branchDiff.createComment",
+          "group": "inline",
+          "when": "commentController == diffbranch.comments"
+        }
+      ],
+      "comments/commentThread/title": [
+        {
+          "command": "branchDiff.deleteComment",
+          "group": "inline",
+          "when": "commentController == diffbranch.comments && commentThread == hasComment"
+        }
+      ],
       "commandPalette": [
         { "command": "branchDiff.markViewed", "when": "false" },
         { "command": "branchDiff.unmarkViewed", "when": "false" },
@@ -155,7 +183,9 @@
         { "command": "branchDiff.treeIgnore", "when": "false" },
         { "command": "branchDiff.treeUnignore", "when": "false" },
         { "command": "branchDiff.treeMarkAllViewed", "when": "false" },
-        { "command": "branchDiff.treeMarkAllUnviewed", "when": "false" }
+        { "command": "branchDiff.treeMarkAllUnviewed", "when": "false" },
+        { "command": "branchDiff.createComment", "when": "false" },
+        { "command": "branchDiff.deleteComment", "when": "false" }
       ]
     }
   }
