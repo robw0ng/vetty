@@ -1,9 +1,14 @@
 {
-  "name": "diffbranch",
-  "displayName": "DiffBranch",
-  "description": "Open every file that differs from another git branch.",
+  "name": "vetty",
+  "displayName": "Vetty",
+  "description": "Vet code you didn't write — local code review for VS Code.",
   "version": "0.0.1",
   "publisher": "local",
+  "keywords": [
+    "code review", "pull request", "PR", "diff", "branch diff",
+    "review", "pre-commit", "self-review", "viewed", "changed files",
+    "working tree", "local review", "git", "AI review"
+  ],
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Other"],
   "activationEvents": ["onStartupFinished"],
@@ -11,182 +16,225 @@
   "contributes": {
     "commands": [
       {
-        "command": "branchDiff.openAll",
+        "command": "vetty.openAll",
         "title": "Open All Files Changed vs Branch",
-        "category": "db"
+        "category": "Vetty"
       },
       {
-        "command": "branchDiff.openUnviewed",
+        "command": "vetty.openUnviewed",
         "title": "Open Unviewed Files Changed vs Branch",
-        "category": "db"
+        "category": "Vetty"
       },
       {
-        "command": "branchDiff.openViewed",
+        "command": "vetty.openViewed",
         "title": "Open Viewed Files Changed vs Branch",
-        "category": "db"
+        "category": "Vetty"
       },
       {
-        "command": "branchDiff.toggleViewed",
+        "command": "vetty.toggleViewed",
         "title": "Toggle Viewed",
-        "category": "db"
+        "category": "Vetty"
       },
       {
-        "command": "branchDiff.markViewed",
+        "command": "vetty.markViewed",
         "title": "Mark Viewed",
-        "category": "db",
+        "category": "Vetty",
         "icon": "$(eye)"
       },
       {
-        "command": "branchDiff.unmarkViewed",
+        "command": "vetty.unmarkViewed",
         "title": "Mark Unviewed",
-        "category": "db",
+        "category": "Vetty",
         "icon": "$(eye-closed)"
       },
       {
-        "command": "branchDiff.clearViewed",
+        "command": "vetty.clearViewed",
         "title": "Clear Viewed Marks",
-        "category": "db"
+        "category": "Vetty"
       },
-      { "command": "branchDiff.reviewPr", "title": "Review Pull Request", "category": "db", "icon": "$(git-pull-request)" },
-      { "command": "branchDiff.finishReview", "title": "Finish Review (delete PR branch)", "category": "db", "icon": "$(trash)" },
-      { "command": "branchDiff.treePickBranch", "title": "Change Branch", "icon": "$(git-branch)" },
-      { "command": "branchDiff.treeRefresh", "title": "Refresh", "icon": "$(refresh)" },
-      { "command": "branchDiff.treeOpenUnviewed", "title": "Open All Unviewed", "icon": "$(eye)" },
-      { "command": "branchDiff.treeOpenFile", "title": "Open File", "icon": "$(go-to-file)" },
-      { "command": "branchDiff.treeOpenDiff", "title": "Open as Diff", "icon": "$(git-compare)" },
-      { "command": "branchDiff.treeToggleViewed", "title": "Toggle Viewed", "icon": "$(eye)" },
-      { "command": "branchDiff.treeIgnore", "title": "Untrack File", "icon": "$(circle-slash)" },
-      { "command": "branchDiff.treeUnignore", "title": "Track File", "icon": "$(check)" },
-      { "command": "branchDiff.treeOpenGroup", "title": "Open All in Group", "icon": "$(go-to-file)" },
-      { "command": "branchDiff.treeMarkAllViewed", "title": "Mark All Viewed", "icon": "$(eye-closed)" },
-      { "command": "branchDiff.treeMarkAllUnviewed", "title": "Mark All Unviewed", "icon": "$(eye)" },
-      { "command": "branchDiff.exportComments", "title": "Export Comments to Clipboard", "category": "db", "icon": "$(copy)" },
-      { "command": "branchDiff.createComment", "title": "Add Comment" },
-      { "command": "branchDiff.deleteComment", "title": "Delete Comment", "icon": "$(trash)" }
+      { "command": "vetty.treePickBranch", "title": "Change Branch", "icon": "$(git-branch)" },
+      { "command": "vetty.treeRefresh", "title": "Refresh", "icon": "$(refresh)" },
+      { "command": "vetty.treeOpenUnviewed", "title": "Open All Unviewed", "icon": "$(eye)" },
+      { "command": "vetty.treeOpenFile", "title": "Open File", "icon": "$(go-to-file)" },
+      { "command": "vetty.treeOpenDiff", "title": "Open as Diff", "icon": "$(git-compare)" },
+      { "command": "vetty.treeView", "title": "View", "icon": "$(eye)" },
+      { "command": "vetty.treeUnview", "title": "Unview", "icon": "$(eye-closed)" },
+      { "command": "vetty.treeIgnore", "title": "Untrack File", "icon": "$(circle-slash)" },
+      { "command": "vetty.treeUnignore", "title": "Track File", "icon": "$(check)" },
+      { "command": "vetty.viewAsTree", "title": "View as Tree", "icon": "$(list-tree)" },
+      { "command": "vetty.viewAsList", "title": "View as List", "icon": "$(list-flat)" },
+      { "command": "vetty.diffSinceReview", "title": "Diffing Full (click for Since Last Review)", "icon": "$(history)" },
+      { "command": "vetty.diffFull", "title": "Diffing Since Last Review (click for Full)", "icon": "$(git-compare)" },
+      { "command": "vetty.copyPaths", "title": "Copy Path(s)" },
+      { "command": "vetty.treeOpenGroup", "title": "Open All in Group", "icon": "$(go-to-file)" },
+      { "command": "vetty.treeMarkAllViewed", "title": "View All", "icon": "$(eye-closed)" },
+      { "command": "vetty.treeMarkAllUnviewed", "title": "Unview All", "icon": "$(eye)" },
+      { "command": "vetty.exportComments", "title": "Export Comments to Clipboard", "category": "Vetty", "icon": "$(copy)" },
+      { "command": "vetty.clearComments", "title": "Clear All Comments", "category": "Vetty", "icon": "$(clear-all)" },
+      { "command": "vetty.createComment", "title": "Add Comment" },
+      { "command": "vetty.deleteComment", "title": "Delete Comment", "icon": "$(trash)" },
+      { "command": "vetty.copyComment", "title": "Copy Comment", "icon": "$(copy)" }
     ],
     "viewsContainers": {
       "activitybar": [
-        { "id": "diffbranch", "title": "DiffBranch", "icon": "$(git-compare)" }
+        { "id": "vetty", "title": "Vetty", "icon": "$(git-compare)" }
       ]
     },
     "views": {
-      "diffbranch": [
-        { "type": "webview", "id": "diffbranchSearch", "name": "Search" },
-        { "id": "diffbranchView", "name": "Review" }
+      "vetty": [
+        { "type": "webview", "id": "vettySearch", "name": "Search" },
+        { "id": "vettyView", "name": "Review" },
+        { "id": "vettyTodos", "name": "Todos" }
       ]
     },
     "menus": {
       "editor/title": [
         {
-          "command": "branchDiff.markViewed",
+          "command": "vetty.markViewed",
           "group": "navigation",
-          "when": "!diffbranch.activeViewed"
+          "when": "!vetty.activeViewed"
         },
         {
-          "command": "branchDiff.unmarkViewed",
+          "command": "vetty.unmarkViewed",
           "group": "navigation",
-          "when": "diffbranch.activeViewed"
+          "when": "vetty.activeViewed"
         }
       ],
       "view/title": [
-        { "command": "branchDiff.reviewPr", "when": "view == diffbranchView", "group": "navigation@0" },
-        { "command": "branchDiff.finishReview", "when": "view == diffbranchView && diffbranch.reviewing", "group": "navigation@1" },
-        { "command": "branchDiff.exportComments", "when": "view == diffbranchView", "group": "navigation@2" },
-        { "command": "branchDiff.treePickBranch", "when": "view == diffbranchView", "group": "navigation@3" },
-        { "command": "branchDiff.treeRefresh", "when": "view == diffbranchView", "group": "navigation@4" }
+        { "command": "vetty.treePickBranch", "when": "view == vettyView", "group": "navigation@1" },
+        { "command": "vetty.treeRefresh", "when": "view == vettyView", "group": "navigation@2" },
+        { "command": "vetty.diffFull", "when": "view == vettyView && vetty.sinceReview", "group": "navigation@3" },
+        { "command": "vetty.diffSinceReview", "when": "view == vettyView && !vetty.sinceReview", "group": "navigation@3" },
+        { "command": "vetty.viewAsTree", "when": "view == vettyView && !vetty.nested", "group": "navigation@4" },
+        { "command": "vetty.viewAsList", "when": "view == vettyView && vetty.nested", "group": "navigation@4" },
+        { "command": "vetty.exportComments", "when": "view == vettyView", "group": "navigation@5" },
+        { "command": "vetty.clearComments", "when": "view == vettyView", "group": "navigation@6" }
       ],
       "view/item/context": [
         {
-          "command": "branchDiff.treeOpenGroup",
-          "when": "view == diffbranchView && viewItem =~ /^group-/",
+          "command": "vetty.treeOpenGroup",
+          "when": "view == vettyView && viewItem =~ /^group-/",
           "group": "inline@0"
         },
         {
-          "command": "branchDiff.treeMarkAllViewed",
-          "when": "view == diffbranchView && viewItem == group-unviewed",
+          "command": "vetty.treeMarkAllViewed",
+          "when": "view == vettyView && viewItem == group-unviewed",
           "group": "inline@1"
         },
         {
-          "command": "branchDiff.treeMarkAllUnviewed",
-          "when": "view == diffbranchView && viewItem == group-viewed",
+          "command": "vetty.treeMarkAllUnviewed",
+          "when": "view == vettyView && viewItem == group-viewed",
           "group": "inline@1"
         },
         {
-          "command": "branchDiff.treeToggleViewed",
-          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "command": "vetty.treeIgnore",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
           "group": "inline@1"
         },
         {
-          "command": "branchDiff.treeOpenFile",
-          "when": "view == diffbranchView && viewItem =~ /^file-/",
+          "command": "vetty.treeUnignore",
+          "when": "view == vettyView && viewItem == file-ignored",
+          "group": "inline@1"
+        },
+        {
+          "command": "vetty.treeOpenFile",
+          "when": "view == vettyView && viewItem =~ /^file-/",
           "group": "inline@2"
         },
         {
-          "command": "branchDiff.treeIgnore",
-          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "command": "vetty.treeView",
+          "when": "view == vettyView && viewItem == file-unviewed",
           "group": "inline@3"
         },
         {
-          "command": "branchDiff.treeUnignore",
-          "when": "view == diffbranchView && viewItem == file-ignored",
+          "command": "vetty.treeUnview",
+          "when": "view == vettyView && viewItem == file-viewed",
           "group": "inline@3"
         },
         {
-          "command": "branchDiff.treeOpenDiff",
-          "when": "view == diffbranchView && viewItem =~ /^file-/",
+          "command": "vetty.treeOpenDiff",
+          "when": "view == vettyView && viewItem =~ /^file-/",
           "group": "navigation@1"
         },
         {
-          "command": "branchDiff.treeOpenFile",
-          "when": "view == diffbranchView && viewItem =~ /^file-/",
+          "command": "vetty.treeOpenFile",
+          "when": "view == vettyView && viewItem =~ /^file-/",
           "group": "navigation@2"
         },
         {
-          "command": "branchDiff.treeToggleViewed",
-          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "command": "vetty.treeView",
+          "when": "view == vettyView && viewItem == file-unviewed",
           "group": "navigation@3"
         },
         {
-          "command": "branchDiff.treeIgnore",
-          "when": "view == diffbranchView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "command": "vetty.treeUnview",
+          "when": "view == vettyView && viewItem == file-viewed",
+          "group": "navigation@3"
+        },
+        {
+          "command": "vetty.treeIgnore",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
           "group": "navigation@4"
         },
         {
-          "command": "branchDiff.treeUnignore",
-          "when": "view == diffbranchView && viewItem == file-ignored",
+          "command": "vetty.treeUnignore",
+          "when": "view == vettyView && viewItem == file-ignored",
           "group": "navigation@4"
         }
       ],
       "comments/commentThread/context": [
         {
-          "command": "branchDiff.createComment",
+          "command": "vetty.createComment",
           "group": "inline",
-          "when": "commentController == diffbranch.comments"
+          "when": "commentController == vetty.comments"
         }
       ],
       "comments/commentThread/title": [
         {
-          "command": "branchDiff.deleteComment",
+          "command": "vetty.deleteComment",
           "group": "inline",
-          "when": "commentController == diffbranch.comments && commentThread == hasComment"
+          "when": "commentController == vetty.comments && commentThread == hasComment"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "vetty.copyComment",
+          "group": "inline",
+          "when": "commentController == vetty.comments"
         }
       ],
       "commandPalette": [
-        { "command": "branchDiff.markViewed", "when": "false" },
-        { "command": "branchDiff.unmarkViewed", "when": "false" },
-        { "command": "branchDiff.treePickBranch", "when": "false" },
-        { "command": "branchDiff.treeRefresh", "when": "false" },
-        { "command": "branchDiff.treeOpenUnviewed", "when": "false" },
-        { "command": "branchDiff.treeOpenFile", "when": "false" },
-        { "command": "branchDiff.treeOpenDiff", "when": "false" },
-        { "command": "branchDiff.treeToggleViewed", "when": "false" },
-        { "command": "branchDiff.treeIgnore", "when": "false" },
-        { "command": "branchDiff.treeUnignore", "when": "false" },
-        { "command": "branchDiff.treeMarkAllViewed", "when": "false" },
-        { "command": "branchDiff.treeMarkAllUnviewed", "when": "false" },
-        { "command": "branchDiff.createComment", "when": "false" },
-        { "command": "branchDiff.deleteComment", "when": "false" }
+        { "command": "vetty.markViewed", "when": "false" },
+        { "command": "vetty.unmarkViewed", "when": "false" },
+        { "command": "vetty.treePickBranch", "when": "false" },
+        { "command": "vetty.treeRefresh", "when": "false" },
+        { "command": "vetty.treeOpenUnviewed", "when": "false" },
+        { "command": "vetty.treeOpenFile", "when": "false" },
+        { "command": "vetty.treeOpenDiff", "when": "false" },
+        { "command": "vetty.viewAsTree", "when": "false" },
+        { "command": "vetty.viewAsList", "when": "false" },
+        { "command": "vetty.diffSinceReview", "when": "false" },
+        { "command": "vetty.diffFull", "when": "false" },
+        { "command": "vetty.treeView", "when": "false" },
+        { "command": "vetty.treeUnview", "when": "false" },
+        { "command": "vetty.treeIgnore", "when": "false" },
+        { "command": "vetty.treeUnignore", "when": "false" },
+        { "command": "vetty.treeMarkAllViewed", "when": "false" },
+        { "command": "vetty.treeMarkAllUnviewed", "when": "false" },
+        { "command": "vetty.createComment", "when": "false" },
+        { "command": "vetty.deleteComment", "when": "false" },
+        { "command": "vetty.copyComment", "when": "false" },
+        { "command": "vetty.copyPaths", "when": "false" },
+        { "command": "vetty.openTodo", "when": "false" }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "vetty.copyPaths",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "focusedView == vettyView"
+      }
+    ]
   }
 }
