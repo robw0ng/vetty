@@ -5,6 +5,7 @@ const os = require('os');
 const crypto = require('crypto');
 const path = require('path');
 const { promisify } = require('util');
+const { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks } = require('./lib');
 
 const execFileAsync = promisify(cp.execFile);
 
@@ -142,34 +143,14 @@ const TODO_RE = /\b(TODO|FIXME|HACK|XXX|BUG|NOTE|OPTIMIZE|REVIEW|WIP|TEMP|REFACT
 
 /** TODO/FIXME markers introduced vs base: added diff lines + every line of untracked files. */
 async function findTodos(cwd, base) {
-  const todos = []; // { rel, line, text }
   let out = '';
   try {
     const ref = await mergeBaseRef(cwd, base); // markers this branch added, not the base's
     out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
   } catch {
-    return todos;
+    return [];
   }
-  let rel = null;
-  let newLine = 0;
-  for (const line of out.split('\n')) {
-    if (line.startsWith('+++ ')) {
-      rel = line.slice(4).replace(/^b\//, '');
-      continue;
-    }
-    if (line.startsWith('---')) continue;
-    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)/);
-    if (hunk) {
-      newLine = parseInt(hunk[1], 10);
-      continue;
-    }
-    if (line.startsWith('+')) {
-      const content = line.slice(1);
-      if (rel && TODO_RE.test(content)) todos.push({ rel, line: newLine, text: content.trim() });
-      newLine++;
-    }
-    // '-' lines (deletions) don't advance the new-file counter; with -U0 there are no context lines.
-  }
+  const todos = parseTodoHunks(out, TODO_RE); // { rel, line, text }[]
   for (const u of await untrackedFiles(cwd)) {
     try {
       fs.readFileSync(path.join(cwd, u), 'utf8').split('\n').forEach((l, i) => {
@@ -274,28 +255,61 @@ function activeRelPath(cwd) {
   return rel.split(path.sep).join('/');
 }
 
-// Only auto-pick a base if a conventional base branch exists. Otherwise return null and let the user
-// pick one manually (the tree shows "Select a branch to diff against…").
-async function defaultBase(cwd) {
-  let cur = '';
+/** Commits in HEAD-not-branch (ahead) and branch-not-HEAD (behind). null if it can't be computed. */
+async function aheadBehind(cwd, branch) {
   try {
-    cur = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    return parseAheadBehind(await git(cwd, ['rev-list', '--left-right', '--count', `${branch}...HEAD`]));
   } catch {
-    // detached/no HEAD — fall through
+    return null; // unrelated histories / bad ref
   }
-  let names = [];
+}
+
+const MAX_REL_BRANCHES = 50; // cap ahead/behind computation to the most-recent branches (perf)
+
+async function currentBranch(cwd) {
   try {
-    names = (await git(cwd, ['branch', '--format=%(refname:short)']))
+    return (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+  } catch {
+    return '';
+  }
+}
+
+async function localBranches(cwd) {
+  try {
+    return (await git(cwd, ['branch', '--format=%(refname:short)', '--sort=-committerdate']))
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
   } catch {
-    return null;
+    return [];
   }
+}
+
+// Git stores no parent, so infer it: a branch whose tip is an ANCESTOR of HEAD (behind === 0, ahead > 0)
+// is one this branch was built on; the DIRECT parent is the ancestor closest to HEAD (fewest commits
+// ahead). Falls back to a conventional base branch, then the most recent other branch.
+async function defaultBase(cwd) {
+  const cur = await currentBranch(cwd);
+  const names = await localBranches(cwd);
+  if (!names.length) return null;
+  const others = names.filter((n) => n !== cur).slice(0, MAX_REL_BRANCHES);
+
+  let parent = null;
+  let parentAhead = Infinity;
+  await Promise.all(
+    others.map(async (b) => {
+      const ab = await aheadBehind(cwd, b);
+      if (ab && ab.behind === 0 && ab.ahead > 0 && ab.ahead < parentAhead) {
+        parentAhead = ab.ahead;
+        parent = b;
+      }
+    })
+  );
+  if (parent) return parent;
   for (const c of ['main', 'master', 'develop', 'dev', 'trunk']) {
     if (c !== cur && names.includes(c)) return c;
   }
-  return null; // no common base branch found — user picks manually
+  return names.filter((n) => n !== cur)[0] || null;
 }
 
 /** On first run (no base chosen yet), seed the base with the best guess so the tree just works. */
@@ -346,12 +360,6 @@ function makeComment(text) {
 }
 function bodyText(c) {
   return typeof c.body === 'string' ? c.body : c.body.value;
-}
-/** 1-based "12" or "12-18" for a 0-based range. A range ending at column 0 doesn't include that line. */
-function lineRef(sLine, eLine, eChar) {
-  const last = eChar === 0 && eLine > sLine ? eLine : eLine + 1; // 1-based last included line
-  const start = sLine + 1;
-  return start === last ? `${start}` : `${start}-${last}`;
 }
 
 /** Reserialize all live threads back to workspaceState. `anchor` = the start line's text, so the
@@ -642,28 +650,55 @@ function activate(context) {
   })();
 }
 
-/** Branch picker — local branches only (remote/PR review is its own flow), recent first. */
+/** Branch picker — local branches, labeled by their relationship to the current branch (parent /
+ *  ancestor / descendant / diverged), with the inferred direct parent surfaced first. */
 async function pickBranch(context, cwd) {
   const last = lastBranch(context);
-  const branchesPromise = git(cwd, ['branch', '--format=%(refname:short)', '--sort=-committerdate'])
-    .then((out) => {
-      const branches = out
-        .split('\n')
-        .map((s) => s.trim())
-        .filter(Boolean);
-      return last && branches.includes(last)
-        ? [last, ...branches.filter((b) => b !== last)]
-        : branches;
-    })
-    .catch((e) => {
-      vscode.window.showErrorMessage(`Could not list branches: ${e.message}`);
-      return [];
+  const itemsPromise = (async () => {
+    const cur = await currentBranch(cwd);
+    const others = (await localBranches(cwd)).filter((n) => n !== cur);
+    if (!others.length) return [];
+    const rels = new Map();
+    await Promise.all(others.slice(0, MAX_REL_BRANCHES).map(async (b) => rels.set(b, await aheadBehind(cwd, b))));
+
+    const items = others.map((b) => {
+      const ab = rels.get(b);
+      let description = '';
+      let rank = 5; // sort bucket: parent(0) ancestor(1) same(2) diverged(3) descendant(4) unknown(5)
+      let ahead = Infinity;
+      if (ab) {
+        ahead = ab.ahead;
+        if (ab.behind === 0 && ab.ahead > 0) (description = `ancestor · ${ab.ahead} ahead`), (rank = 1);
+        else if (ab.ahead === 0 && ab.behind > 0) (description = `descendant · ${ab.behind} behind`), (rank = 4);
+        else if (ab.ahead > 0 && ab.behind > 0) (description = `↑${ab.ahead} ↓${ab.behind}`), (rank = 3);
+        else (description = 'up to date'), (rank = 2);
+      }
+      return { label: b, description, branch: b, rank, ahead };
     });
 
-  const base = await vscode.window.showQuickPick(branchesPromise, {
+    // Direct parent = the ancestor closest to HEAD (fewest commits ahead).
+    const parent = items.filter((i) => i.rank === 1).sort((a, b) => a.ahead - b.ahead)[0];
+    if (parent) {
+      parent.description = `parent · ${parent.ahead} ahead`;
+      parent.rank = 0;
+    }
+    // Sort by bucket; within ancestors/parent, nearest first (fewest commits ahead) = stack order.
+    items.sort((a, b) => a.rank - b.rank || a.ahead - b.ahead);
+    if (last) {
+      const i = items.findIndex((x) => x.branch === last);
+      if (i > 0) items.unshift(items.splice(i, 1)[0]); // last-used to the very top
+    }
+    return items;
+  })().catch((e) => {
+    vscode.window.showErrorMessage(`Could not list branches: ${e.message}`);
+    return [];
+  });
+
+  const pick = await vscode.window.showQuickPick(itemsPromise, {
     placeHolder: 'Diff against which local branch?',
   });
-  if (!base) return null;
+  if (!pick) return null;
+  const base = pick.branch;
   await context.workspaceState.update(LAST_BRANCH_KEY, base);
   updateViewedContext(context);
   return base;
@@ -846,13 +881,6 @@ function postSearchCounts() {
   searchWebview.postMessage({ type: 'counts', shown: diffTree.visibleFiles(cwd).length, total });
 }
 
-/** Build the matcher from the search box + toggles. Throws on an invalid regex. */
-function buildSearchRegex(m) {
-  let src = m.value;
-  if (!m.regex) src = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // literal: escape regex metachars
-  if (m.wholeWord) src = `\\b${src}\\b`;
-  return new RegExp(src, m.caseSensitive ? '' : 'i');
-}
 
 /** Search the shown files (in JS — works for tracked + untracked) and fold results INTO the Review tree. */
 function runScopedSearch(m) {
@@ -1103,10 +1131,7 @@ class DiffTree {
         }
         // +/- line counts (binary files report "-\t-"); skipped silently.
         const ns = await git(cwd, ['diff', '--numstat', '--diff-filter=d', this.baseRef]);
-        for (const line of ns.split('\n')) {
-          const m = line.match(/^(\d+)\t(\d+)\t(.+)$/);
-          if (m) stat.set(m[3].trim(), { add: +m[1], del: +m[2] });
-        }
+        parseNumstat(ns).forEach((v, k) => stat.set(k, v));
         // Files with real (non-whitespace) changes — anything else is formatting-only.
         for (const r of (await git(cwd, ['diff', '--name-only', '-w', '--diff-filter=d', this.baseRef])).split('\n')) {
           const rel = r.trim();

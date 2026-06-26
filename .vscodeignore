@@ -1,0 +1,8 @@
+# Keep the published .vsix lean — exclude everything not needed at runtime.
+.vscode/**
+.gitignore
+.git/**
+**/*.map
+scratchpad/**
+test/**
+*.vsix

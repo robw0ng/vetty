@@ -15,7 +15,7 @@ what changed since your last pass.
 |---|---|---|
 | **Diff vs branch** | Lists every file changed vs a branch you pick | See the whole scope of work in one place |
 | **Diff working changes** | Pick your current branch → shows just uncommitted edits | Review your own work before committing |
-| **Auto base branch** | Defaults to main/master/develop if present | No setup — it just works on open |
+| **Auto base branch** | Infers the current branch's direct parent (closest ancestor); picker labels parent/ancestor/descendant/diverged | Diffs against the right base with no setup |
 | **Viewed tracking** | Mark files viewed; edit one and it auto-flags unviewed again | Always know what you've actually looked at |
 | **Progress count** | Shows `3/12 viewed` by the title | See review completeness at a glance |
 | **Auto-advance** | Mark viewed → next unviewed file opens automatically | Blow through a review without clicking around |
