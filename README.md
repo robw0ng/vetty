@@ -26,13 +26,20 @@ what changed since your last pass.
 | **Track / Untrack** | Push noise files (lockfiles, generated) into their own section | Focus only on what matters |
 | **Folder vs flat toggle** | Switch between nested folders and a flat file list | Flat for small diffs, nested for big ones |
 | **Multi-select** | Shift/Ctrl-click files → bulk view/untrack/open | Act on many files at once |
-| **Filename filter** | Live-filter the tree by name | Jump to a file in a huge diff |
-| **Text search** | Search inside changed files only (case/word/regex) | Find code without searching the whole repo |
+| **Scope chips** | Narrow the tree to All / Unviewed / Added / Modified | One click to "just what I haven't reviewed" |
+| **Filename filter** | Live-filter the tree by name, with match count + clear | Jump to a file in a huge diff |
+| **Text search** | Searches the shown files (case/word/regex); matches fold into the Review tree | Find code without leaving the panel — rows expand to matching lines |
 | **Inline comments** | Leave PR-style notes on lines; they persist | Jot review thoughts right where they belong |
 | **Copy / export comments** | Copy one or all as `file:line(s) — note` (spans multi-line ranges) | Paste into AI chat or a ticket |
 | **TODO scanner** | Lists new TODO/FIXME/etc added in the branch | Catch leftover markers before they ship |
 | **Auto-refresh** | Reloads on any file/git change (incl. AI edits) | Tree stays current, no manual refresh |
 | **Open file / diff** | One click per row, or all-in-group | Get into the actual review fast |
+| **Merge-base diff + fetch** | Diffs against the merge-base (like GitHub's "files changed"); Fetch button updates remotes | Accurate change list even when the base has moved on |
+| **PR review** *(needs `gh`)* | Check out a teammate's PR, see its existing comments inline, submit Comment/Approve/Request-changes back | Full two-way PR review without leaving the editor |
+| **Line counts** | `+42 −7` per file row | Triage which file to review first |
+| **Stage viewed** | One click stages every file you marked viewed | Bridge from review straight to a commit |
+| **Review-complete** | Title shows `✓ all N reviewed` when done | Know when you've covered everything |
+| **Copy paths / keys** | Ctrl+C copies selected paths; `j`/`k` next/prev unviewed, `v` toggle | Fast keyboard-driven review |
 
 ## Getting started
 
@@ -45,6 +52,28 @@ what changed since your last pass.
 
 `branch` · `refresh` · `diff-mode (since-review / full)` · `tree / flat` · `export comments` · `clear comments`
 
+## Pull request review (optional)
+
+With the **GitHub CLI (`gh`)** installed and authenticated (`gh auth login`), Vetty can review
+teammate PRs end to end:
+
+1. Click the **pull-request** button → pick an open PR → Vetty checks it out and diffs it against
+   its base branch (`origin/<base>`, fetched fresh). The PR's existing review comments appear inline
+   as read-only threads.
+2. Review files, mark them viewed, leave inline comments.
+3. **Submit Review** → choose **Comment**, **Approve**, or **Request changes** → your local comments
+   post to the PR as one review.
+4. **Finish Review** → returns to your previous branch and deletes the local PR branch.
+
+PR features only appear when `gh` is available. Turn them off entirely with the setting
+`vetty.pullRequests.enabled: false` to keep Vetty purely local.
+
+## Keyboard (when the Review view is focused)
+
+- `j` / `k` — open next / previous unviewed file
+- `v` — toggle viewed on the active file
+- `Ctrl/Cmd+C` — copy selected file paths
+
 ## How it works
 
 - **Changed files:** `git diff --name-status --diff-filter=d <base>` plus untracked files
@@ -54,10 +83,12 @@ what changed since your last pass.
 - **Since-last-review diff:** unviewed files diff against that snapshot blob instead of the base
   branch, so you see only what changed since your last pass. Snapshots are best-effort git objects;
   if one is ever garbage-collected, the diff falls back gracefully.
-- **Comments:** built on VS Code's native Comments API, persisted in workspace state (local only —
-  not synced to any PR).
+- **Comments:** built on VS Code's native Comments API, persisted in workspace state. Local by
+  default; during a PR review you can push them to the PR as a GitHub review.
 
 ## Notes
 
 - Works in VS Code and any VS Code fork (Cursor, Windsurf, VSCodium). Not JetBrains/Rider.
 - Comments and viewed-state are local to your machine and stored per workspace.
+- PR review needs the GitHub CLI (`gh`); without it (or with `vetty.pullRequests.enabled: false`)
+  Vetty runs fully local with no change to the rest of its features.

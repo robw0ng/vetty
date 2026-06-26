@@ -1,6 +1,7 @@
 const vscode = require('vscode');
 const cp = require('child_process');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
 const path = require('path');
 const { promisify } = require('util');
@@ -9,6 +10,7 @@ const execFileAsync = promisify(cp.execFile);
 
 const LAST_BRANCH_KEY = 'vetty.lastBranch';
 const MAX_OPEN_WITHOUT_CONFIRM = 30;
+const PAGE_SIZE = 500; // flat-view rows per group before a "Show more" row appears
 
 // Own scheme for the diff's base side. Built-in `git:` errors on files absent from base (added
 // files), breaking the diff; this provider returns '' for those so the left side just shows empty.
@@ -83,6 +85,7 @@ let extContext = null; // set in activate; lets command wrappers reach workspace
 function refreshTree() {
   diffTree?.refresh();
   diffTree?.updateProgress();
+  postSearchCounts();
 }
 
 function getCwd() {
@@ -95,6 +98,45 @@ async function git(cwd, args) {
   return stdout;
 }
 
+// Resolve the ref to diff against: the merge-base of `base` and HEAD, NOT base's tip. This matches
+// GitHub's "files changed" (only what this branch added since it forked) — diffing against the tip
+// of a base that has since advanced would wrongly include every file the base moved ahead on.
+// If base IS an ancestor (e.g. the current branch), merge-base ≈ HEAD, so working changes still show.
+async function mergeBaseRef(cwd, base) {
+  try {
+    const mb = (await git(cwd, ['merge-base', base, 'HEAD'])).trim();
+    return mb || base;
+  } catch {
+    return base;
+  }
+}
+
+/** GitHub CLI. PR features are gated on this being present + authenticated. */
+async function gh(cwd, args) {
+  const { stdout } = await execFileAsync('gh', args, { cwd, maxBuffer: 16 * 1024 * 1024 });
+  return stdout;
+}
+let hasGh = false; // gh installed + authed
+function prEnabled() {
+  return vscode.workspace.getConfiguration('vetty').get('pullRequests.enabled', true);
+}
+async function updatePrMode() {
+  // PR features require both the setting AND a working gh.
+  await vscode.commands.executeCommand('setContext', 'vetty.prMode', hasGh && prEnabled());
+}
+async function detectGh(cwd) {
+  try {
+    await execFileAsync('gh', ['auth', 'status'], { cwd });
+    hasGh = true;
+  } catch {
+    hasGh = false;
+  }
+  await updatePrMode();
+  return hasGh;
+}
+
+const REVIEW_KEY = 'vetty.review'; // { original, prBranch, number, repo, headSha } while reviewing a PR
+
 // Case-sensitive (uppercase) so prose words like "note"/"bug" don't false-positive.
 const TODO_RE = /\b(TODO|FIXME|HACK|XXX|BUG|NOTE|OPTIMIZE|REVIEW|WIP|TEMP|REFACTOR|DEPRECATED)\b/;
 
@@ -103,7 +145,8 @@ async function findTodos(cwd, base) {
   const todos = []; // { rel, line, text }
   let out = '';
   try {
-    out = await git(cwd, ['diff', '-U0', '--diff-filter=d', base]); // -U0 → only added lines, no context
+    const ref = await mergeBaseRef(cwd, base); // markers this branch added, not the base's
+    out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
   } catch {
     return todos;
   }
@@ -284,6 +327,11 @@ let commentController = null;
 const commentThreads = []; // live threads we manage
 const builtDocs = new Set(); // uri.toString() already hydrated this session
 
+// Read-only comment threads pulled FROM the PR being reviewed (so you see teammates' existing review).
+let prCommentMap = new Map(); // rel → [{ line, body, author }]
+const prThreads = []; // live read-only PR threads (disposed when the review ends)
+const prBuiltDocs = new Set();
+
 function getComments(context) {
   return context.workspaceState.get(COMMENTS_KEY) || {};
 }
@@ -311,6 +359,7 @@ async function persistComments(context) {
   const cwd = getCwd();
   const map = {};
   for (const t of commentThreads) {
+    if (t.isPr) continue; // never persist pulled-from-PR threads as local comments
     const rel = t.dbRel || (cwd && relOf(cwd, t.uri));
     if (!rel || !t.comments.length) continue;
     (map[rel] ||= []).push({
@@ -338,6 +387,50 @@ function hydrateComments(context, doc) {
     thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
     commentThreads.push(thread);
   }
+  addPrThreads(doc);
+}
+
+/** Fetch the active PR's existing review comments (read-only) so they show inline. */
+async function fetchPrComments(cwd, repo, number) {
+  prCommentMap = new Map();
+  try {
+    const out = await gh(cwd, ['api', '--paginate', `repos/${repo}/pulls/${number}/comments?per_page=100`]);
+    for (const c of JSON.parse(out)) {
+      const ln = c.line ?? c.original_line; // original_line for outdated comments
+      if (!c.path || !ln) continue;
+      if (!prCommentMap.has(c.path)) prCommentMap.set(c.path, []);
+      prCommentMap.get(c.path).push({ line: ln, body: c.body || '', author: c.user?.login || 'reviewer' });
+    }
+  } catch {
+    // no comments / API hiccup — leave empty
+  }
+}
+
+/** Render the PR's existing comments as read-only threads in a freshly opened doc. */
+function addPrThreads(doc) {
+  const cwd = getCwd();
+  if (!commentController || !cwd || !prCommentMap.size || doc.uri.scheme !== 'file') return;
+  const key = doc.uri.toString();
+  if (prBuiltDocs.has(key)) return;
+  prBuiltDocs.add(key);
+  const rel = relOf(cwd, doc.uri);
+  for (const c of prCommentMap.get(rel) || []) {
+    const range = new vscode.Range(c.line - 1, 0, c.line - 1, 0);
+    const comment = { body: new vscode.MarkdownString(c.body), mode: vscode.CommentMode.Preview, author: { name: c.author } };
+    const thread = commentController.createCommentThread(doc.uri, range, [comment]);
+    thread.isPr = true; // never persisted, no edit/delete
+    thread.canReply = false;
+    thread.contextValue = 'prComment';
+    thread.collapsibleState = vscode.CommentThreadCollapsibleState.Collapsed;
+    prThreads.push(thread);
+  }
+}
+
+function clearPrThreads() {
+  for (const t of prThreads) t.dispose();
+  prThreads.length = 0;
+  prBuiltDocs.clear();
+  prCommentMap = new Map();
 }
 
 async function createComment(context, reply) {
@@ -446,6 +539,23 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.diffSinceReview', () => toggleSinceReview(context)),
     vscode.commands.registerCommand('vetty.diffFull', () => toggleSinceReview(context)),
     vscode.commands.registerCommand('vetty.copyPaths', () => copyPaths()),
+    vscode.commands.registerCommand('vetty.showMore', (key) => showMore(key)),
+    vscode.commands.registerCommand('vetty.fetch', () => fetchAndRefresh(context)),
+    vscode.commands.registerCommand('vetty.reviewPr', () => reviewPr(context)),
+    vscode.commands.registerCommand('vetty.finishReview', () => finishReview(context)),
+    vscode.commands.registerCommand('vetty.submitReview', () => submitReview(context)),
+    vscode.commands.registerCommand('vetty.nextUnviewed', () => navigateUnviewed(context, 1)),
+    vscode.commands.registerCommand('vetty.prevUnviewed', () => navigateUnviewed(context, -1)),
+    vscode.commands.registerCommand('vetty.viewCurrent', () => applyViewed(context)),
+    vscode.commands.registerCommand('vetty.togglePrMode', () => togglePrMode()),
+    vscode.commands.registerCommand('vetty.stageViewed', () => stageViewed(context)),
+    vscode.commands.registerCommand('vetty.stageFile', (item, sel) => stageFiles(context, item, sel)),
+    vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (!e.affectsConfiguration('vetty.pullRequests.enabled')) return;
+      await updatePrMode();
+      // Disabling mid-review → clean up the checkout so the user isn't stranded on the PR branch.
+      if (!prEnabled() && context.workspaceState.get(REVIEW_KEY)) await finishReview(context);
+    }),
     vscode.commands.registerCommand('vetty.treeOpenGroup', (item) => treeOpenGroup(item)),
     vscode.commands.registerCommand('vetty.treeMarkAllViewed', (item) => treeMarkAllViewed(context, item)),
     vscode.commands.registerCommand('vetty.treeMarkAllUnviewed', (item) => treeMarkAllUnviewed(context, item)),
@@ -477,6 +587,8 @@ function activate(context) {
 
   vscode.commands.executeCommand('setContext', 'vetty.nested', diffTree.nested);
   vscode.commands.executeCommand('setContext', 'vetty.sinceReview', sinceReviewMode(context));
+  vscode.commands.executeCommand('setContext', 'vetty.reviewing', !!context.workspaceState.get(REVIEW_KEY));
+  updatePrTitle(context);
 
   // Auto-refresh: react to git state (checkout/pull/commit) AND any working-tree edit, including
   // files written outside the editor (e.g. an AI tool editing files directly, no save event).
@@ -501,29 +613,22 @@ function activate(context) {
   }
 
   (async () => {
+    if (cwd) await detectGh(cwd);
     await ensureDefaultBase(context);
     updateViewedContext(context);
     await diffTree.load();
   })();
 }
 
-/** Branch picker — one async git call, shown via a Promise so it appears instantly with a spinner. */
+/** Branch picker — local branches only (remote/PR review is its own flow), recent first. */
 async function pickBranch(context, cwd) {
   const last = lastBranch(context);
-  const branchesPromise = git(cwd, [
-    'branch',
-    '--format=%(HEAD)%09%(refname:short)', // %(HEAD) is `*` for the current branch (skipped).
-    '--sort=-committerdate',
-  ])
+  const branchesPromise = git(cwd, ['branch', '--format=%(refname:short)', '--sort=-committerdate'])
     .then((out) => {
-      const branches = [];
-      for (const line of out.split('\n')) {
-        const tab = line.indexOf('\t');
-        if (tab < 0) continue;
-        const name = line.slice(tab + 1).trim();
-        // Include current branch too: diffing against it shows just the working-tree changes.
-        if (name) branches.push(name);
-      }
+      const branches = out
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
       return last && branches.includes(last)
         ? [last, ...branches.filter((b) => b !== last)]
         : branches;
@@ -542,11 +647,12 @@ async function pickBranch(context, cwd) {
   return base;
 }
 
-/** Files differing from the branch tip (committed + uncommitted), deletes excluded. */
+/** Files this branch changed vs base (merge-base, committed + uncommitted), deletes excluded. */
 async function changedFiles(cwd, base) {
   let files;
   try {
-    files = (await git(cwd, ['diff', '--name-only', '--diff-filter=d', base]))
+    const ref = await mergeBaseRef(cwd, base);
+    files = (await git(cwd, ['diff', '--name-only', '--diff-filter=d', ref]))
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
@@ -583,12 +689,13 @@ async function openFiles(cwd, base, files) {
   });
   if (!mode) return; // Escape cancels.
   const asDiff = mode === 'Open as diff';
+  const ref = await mergeBaseRef(cwd, base); // diff left side = merge-base, not base tip
 
   await Promise.all(
     files.map((rel) => {
       const fileUri = vscode.Uri.file(path.join(cwd, rel));
       if (asDiff) {
-        const baseUri = baseUriFor(fileUri, base);
+        const baseUri = baseUriFor(fileUri, ref);
         return vscode.commands.executeCommand(
           'vscode.diff',
           baseUri,
@@ -702,17 +809,86 @@ async function clearViewed(context) {
   vscode.window.setStatusBarMessage(`Cleared viewed marks for ${base}`, 2500);
 }
 
-/** The "Search" section above the tree: two real input boxes (filename filter + text search). */
+let searchWebview = null; // set in SearchView.resolveWebviewView; used to push match counts
+
+/** Push "shown of total" file counts to the Search panel. */
+function postSearchCounts() {
+  if (!searchWebview || !diffTree) return;
+  const cwd = getCwd();
+  if (!cwd || !diffTree.base) {
+    searchWebview.postMessage({ type: 'counts', shown: 0, total: 0 });
+    return;
+  }
+  const ignored = getIgnored(diffTree.context, diffTree.base);
+  const total = diffTree.files.filter((f) => !ignored.has(f)).length;
+  searchWebview.postMessage({ type: 'counts', shown: diffTree.visibleFiles(cwd).length, total });
+}
+
+/** Build the matcher from the search box + toggles. Throws on an invalid regex. */
+function buildSearchRegex(m) {
+  let src = m.value;
+  if (!m.regex) src = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // literal: escape regex metachars
+  if (m.wholeWord) src = `\\b${src}\\b`;
+  return new RegExp(src, m.caseSensitive ? '' : 'i');
+}
+
+/** Search the shown files (in JS — works for tracked + untracked) and fold results INTO the Review tree. */
+function runScopedSearch(m) {
+  const cwd = getCwd();
+  if (!cwd || !diffTree) return;
+  diffTree.searchMatches = null; // search the filter+scope set, not last run's matches
+  const files = diffTree.visibleFiles(cwd);
+  if (!files.length) {
+    vscode.window.showInformationMessage('No files in scope to search.');
+    return;
+  }
+  let re;
+  try {
+    re = buildSearchRegex(m);
+  } catch (e) {
+    vscode.window.showErrorMessage(`Invalid regex: ${e.message}`);
+    return;
+  }
+  const matches = new Map();
+  let n = 0;
+  outer: for (const rel of files) {
+    let content;
+    try {
+      content = fs.readFileSync(path.join(cwd, rel), 'utf8');
+    } catch {
+      continue; // unreadable
+    }
+    if (content.indexOf('\0') !== -1) continue; // binary
+    const lines = content.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      if (re.test(lines[i])) {
+        if (!matches.has(rel)) matches.set(rel, []);
+        matches.get(rel).push({ line: i + 1, text: lines[i] });
+        if (++n >= 2000) break outer; // safety cap
+      }
+    }
+  }
+  diffTree.searchMatches = matches;
+  diffTree.refresh();
+  diffTree.updateProgress();
+  postSearchCounts();
+  vscode.commands.executeCommand('vettyView.focus'); // stay in the Vetty panel
+  if (!matches.size) vscode.window.setStatusBarMessage('No matches in shown files', 2500);
+}
+
+/** The "Search" section above the tree: scope chips, filename filter, and a scoped text search. */
 class SearchView {
   resolveWebviewView(view) {
     view.webview.options = { enableScripts: true };
+    searchWebview = view.webview;
     const nonce = crypto.randomBytes(16).toString('hex');
     view.webview.html = `<!DOCTYPE html><html><head>
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
   body { padding: 8px; }
   .field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
-  label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--vscode-descriptionForeground); }
+  label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--vscode-descriptionForeground); display: flex; justify-content: space-between; }
+  .count { text-transform: none; letter-spacing: 0; opacity: .8; }
   .box { position: relative; }
   input {
     width: 100%; box-sizing: border-box; padding: 4px 6px; font-size: var(--vscode-font-size);
@@ -721,8 +897,29 @@ class SearchView {
   }
   input:focus { border-color: var(--vscode-focusBorder); }
   input::placeholder { color: var(--vscode-input-placeholderForeground); }
-  #search { padding-right: 76px; }
-  .toggles { position: absolute; right: 3px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; }
+  #filter { padding-right: 24px; }
+  #search { padding-right: 100px; }
+  .chips { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 10px; }
+  .chip {
+    padding: 2px 8px; border-radius: 10px; cursor: pointer; user-select: none; font-size: 11px;
+    border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, transparent));
+    color: var(--vscode-foreground); opacity: .75;
+  }
+  .chip:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+  .chip.active {
+    opacity: 1; background: var(--vscode-inputOption-activeBackground);
+    border-color: var(--vscode-inputOption-activeBorder); color: var(--vscode-inputOption-activeForeground);
+  }
+  .clear {
+    position: absolute; top: 50%; transform: translateY(-50%); width: 18px; height: 18px;
+    display: none; align-items: center; justify-content: center; cursor: pointer; border-radius: 3px;
+    opacity: .6; font-size: 13px;
+  }
+  .clear:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
+  .clear.show { display: inline-flex; }
+  #f-clear { right: 4px; }
+  #s-clear { right: 80px; }
+  .toggles { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; }
   .toggle {
     display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 20px;
     border-radius: 3px; cursor: pointer; user-select: none; font-size: 11px; border: 1px solid transparent;
@@ -734,14 +931,24 @@ class SearchView {
     border-color: var(--vscode-inputOption-activeBorder); color: var(--vscode-inputOption-activeForeground);
   }
 </style></head><body>
-  <div class="field">
-    <label for="filter">Filter files by name</label>
-    <div class="box"><input id="filter" type="text" placeholder="substring…" /></div>
+  <div class="chips" id="chips">
+    <span class="chip" data-scope="all">All</span>
+    <span class="chip" data-scope="unviewed">Unviewed</span>
+    <span class="chip" data-scope="added">Added</span>
+    <span class="chip" data-scope="modified">Modified</span>
   </div>
   <div class="field">
-    <label for="search">Search in changed files</label>
+    <label for="filter"><span>Filter files by name</span><span class="count" id="count"></span></label>
+    <div class="box">
+      <input id="filter" type="text" placeholder="substring…" />
+      <span class="clear" id="f-clear" title="Clear">✕</span>
+    </div>
+  </div>
+  <div class="field">
+    <label for="search">Search in shown files</label>
     <div class="box">
       <input id="search" type="text" placeholder="text, then Enter" />
+      <span class="clear" id="s-clear" title="Clear">✕</span>
       <div class="toggles">
         <span class="toggle" id="t-case" title="Match Case">Aa</span>
         <span class="toggle" id="t-word" title="Match Whole Word">\\b</span>
@@ -752,38 +959,49 @@ class SearchView {
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const f = document.getElementById('filter'), s = document.getElementById('search');
+    const fClear = document.getElementById('f-clear'), sClear = document.getElementById('s-clear');
+    const count = document.getElementById('count');
+    const chips = [...document.querySelectorAll('.chip')];
     const toggles = { case: document.getElementById('t-case'), word: document.getElementById('t-word'), regex: document.getElementById('t-regex') };
-    const state = Object.assign({ filter: '', search: '', case: false, word: false, regex: false }, vscode.getState());
+    const state = Object.assign({ filter: '', search: '', scope: 'all', case: false, word: false, regex: false }, vscode.getState());
     f.value = state.filter; s.value = state.search;
-    for (const k of ['case', 'word', 'regex']) toggles[k].classList.toggle('active', !!state[k]);
     const save = () => vscode.setState(state);
+    const syncUi = () => {
+      for (const k of ['case', 'word', 'regex']) toggles[k].classList.toggle('active', !!state[k]);
+      chips.forEach((c) => c.classList.toggle('active', c.dataset.scope === state.scope));
+      fClear.classList.toggle('show', !!f.value);
+      sClear.classList.toggle('show', !!s.value);
+    };
     const doSearch = () => { if (s.value) vscode.postMessage({ type: 'search', value: s.value, caseSensitive: state.case, wholeWord: state.word, regex: state.regex }); };
-    f.addEventListener('input', () => { state.filter = f.value; save(); vscode.postMessage({ type: 'filter', value: f.value }); });
-    s.addEventListener('input', () => { state.search = s.value; save(); });
+    f.addEventListener('input', () => { state.filter = f.value; save(); syncUi(); vscode.postMessage({ type: 'filter', value: f.value }); });
+    s.addEventListener('input', () => { state.search = s.value; save(); syncUi(); if (!s.value) vscode.postMessage({ type: 'searchClear' }); });
     s.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSearch(); });
-    for (const k of ['case', 'word', 'regex']) toggles[k].addEventListener('click', () => {
-      state[k] = !state[k]; toggles[k].classList.toggle('active', state[k]); save(); doSearch();
+    fClear.addEventListener('click', () => { f.value = ''; state.filter = ''; save(); syncUi(); vscode.postMessage({ type: 'filter', value: '' }); f.focus(); });
+    sClear.addEventListener('click', () => { s.value = ''; state.search = ''; save(); syncUi(); vscode.postMessage({ type: 'searchClear' }); s.focus(); });
+    for (const k of ['case', 'word', 'regex']) toggles[k].addEventListener('click', () => { state[k] = !state[k]; save(); syncUi(); doSearch(); });
+    chips.forEach((c) => c.addEventListener('click', () => { state.scope = c.dataset.scope; save(); syncUi(); vscode.postMessage({ type: 'scope', value: state.scope }); }));
+    window.addEventListener('message', (e) => {
+      if (e.data?.type === 'counts') count.textContent = e.data.total ? (e.data.shown === e.data.total ? e.data.total + ' files' : e.data.shown + ' of ' + e.data.total) : '';
     });
+    syncUi();
+    vscode.postMessage({ type: 'scope', value: state.scope }); // re-apply persisted scope on (re)load
+    if (state.filter) vscode.postMessage({ type: 'filter', value: state.filter });
   </script>
 </body></html>`;
     view.webview.onDidReceiveMessage((m) => {
       if (m.type === 'filter') {
         diffTree.nameFilter = (m.value || '').trim().toLowerCase();
         refreshTree();
+      } else if (m.type === 'scope') {
+        diffTree.scope = m.value || 'all';
+        refreshTree();
       } else if (m.type === 'search' && m.value) {
-        const files = diffTree?.files ?? [];
-        if (!files.length) {
-          vscode.window.showInformationMessage('No changed files to search.');
-          return;
+        runScopedSearch(m); // in-panel results — no swap to VS Code's Search viewlet
+      } else if (m.type === 'searchClear') {
+        if (diffTree?.searchMatches) {
+          diffTree.searchMatches = null;
+          refreshTree();
         }
-        vscode.commands.executeCommand('workbench.action.findInFiles', {
-          query: m.value,
-          filesToInclude: files.join(','), // scope to the changed files only
-          triggerSearch: true,
-          isCaseSensitive: !!m.caseSensitive,
-          matchWholeWord: !!m.wholeWord,
-          isRegex: !!m.regex,
-        });
       }
     });
   }
@@ -799,8 +1017,36 @@ class DiffTree {
     this.files = [];
     this.added = new Set(); // files absent from base — diff left side would be empty, so open them as files
     this.status = new Map(); // rel → status letter (A/M/R/C/T) for the file decoration badge
+    this.stat = new Map(); // rel → { add, del } line counts from --numstat
     this.nameFilter = ''; // lowercased filename filter; '' = show all
+    this.scope = 'all'; // all | unviewed | added | modified — scope chips in the Search panel
+    this.searchMatches = null; // null = no text search; else Map rel → [{line, text}] (filters the tree)
     this.nested = !!context.workspaceState.get('vetty.nested'); // folder tree vs flat list
+    this.pageLimits = {}; // per-group shown-row cap for the flat view (huge-PR paging)
+    this.baseRef = this.base; // merge-base of base+HEAD (resolved in load); what we actually diff against
+  }
+
+  /** True if `rel` passes the active name filter + scope chip (+ text-search match set). */
+  _matches(cwd, viewed, rel) {
+    if (this.searchMatches && !this.searchMatches.has(rel)) return false;
+    if (this.nameFilter && !rel.toLowerCase().includes(this.nameFilter)) return false;
+    switch (this.scope) {
+      case 'unviewed':
+        return !isViewed(cwd, viewed, rel);
+      case 'added':
+        return ['A', 'U'].includes(this.status.get(rel));
+      case 'modified':
+        return ['M', 'T', 'R', 'C'].includes(this.status.get(rel));
+      default:
+        return true;
+    }
+  }
+
+  /** Files currently shown (name filter + scope), excluding untracked-from-review. For text search scoping. */
+  visibleFiles(cwd) {
+    const viewed = getViewed(this.context, this.base);
+    const ignored = getIgnored(this.context, this.base);
+    return this.files.filter((f) => !ignored.has(f) && this._matches(cwd, viewed, f));
   }
 
   refresh() {
@@ -810,12 +1056,14 @@ class DiffTree {
   async load() {
     const cwd = getCwd();
     this.base = lastBranch(this.context);
+    this.baseRef = cwd && this.base ? await mergeBaseRef(cwd, this.base) : this.base;
     const files = [];
     const added = new Set();
     const status = new Map();
+    const stat = new Map();
     if (cwd && this.base) {
       try {
-        const out = await git(cwd, ['diff', '--name-status', '--diff-filter=d', this.base]);
+        const out = await git(cwd, ['diff', '--name-status', '--diff-filter=d', this.baseRef]);
         for (const line of out.split('\n')) {
           const parts = line.split('\t');
           if (parts.length < 2) continue;
@@ -825,6 +1073,12 @@ class DiffTree {
           files.push(rel);
           status.set(rel, letter);
           if (letter === 'A') added.add(rel);
+        }
+        // +/- line counts (binary files report "-\t-"); skipped silently.
+        const ns = await git(cwd, ['diff', '--numstat', '--diff-filter=d', this.baseRef]);
+        for (const line of ns.split('\n')) {
+          const m = line.match(/^(\d+)\t(\d+)\t(.+)$/);
+          if (m) stat.set(m[3].trim(), { add: +m[1], del: +m[2] });
         }
         for (const rel of await untrackedFiles(cwd)) {
           if (status.has(rel)) continue;
@@ -839,8 +1093,10 @@ class DiffTree {
     this.files = files;
     this.added = added;
     this.status = status;
+    this.stat = stat;
     this.refresh();
     this.updateProgress();
+    postSearchCounts();
     fileDecorations.refresh();
     todoTree?.load();
   }
@@ -857,7 +1113,11 @@ class DiffTree {
     const ignored = getIgnored(this.context, this.base);
     const active = this.files.filter((f) => !ignored.has(f));
     const vw = active.filter((f) => isViewed(cwd, viewed, f)).length;
-    diffTreeView.description = active.length ? `${vw}/${active.length} viewed` : '';
+    diffTreeView.description = !active.length
+      ? ''
+      : vw === active.length
+        ? `✓ all ${active.length} reviewed`
+        : `${vw}/${active.length} viewed`;
   }
 
   getTreeItem(el) {
@@ -867,6 +1127,17 @@ class DiffTree {
   getChildren(el) {
     const cwd = getCwd();
     if (!cwd) return [];
+
+    // A file row in search mode expands to its matching lines.
+    if (el && el.matches) {
+      return el.matches.map((mt) => {
+        const it = new vscode.TreeItem(`${mt.line}: ${mt.text.trim().slice(0, 120)}`);
+        it.iconPath = new vscode.ThemeIcon('search');
+        it.tooltip = `${el.rel}:${mt.line}`;
+        it.command = { command: 'vetty.openTodo', title: 'Open', arguments: [el.rel, mt.line] };
+        return it;
+      });
+    }
 
     if (!this.base) {
       const it = new vscode.TreeItem('Select a branch to diff against…');
@@ -878,9 +1149,7 @@ class DiffTree {
     if (!el) {
       const viewed = getViewed(this.context, this.base);
       const ignored = getIgnored(this.context, this.base);
-      const shown = this.nameFilter
-        ? this.files.filter((f) => f.toLowerCase().includes(this.nameFilter))
-        : this.files;
+      const shown = this.files.filter((f) => this._matches(cwd, viewed, f));
       const active = shown.filter((f) => !ignored.has(f));
       const unv = active.filter((f) => !isViewed(cwd, viewed, f));
       const vw = active.filter((f) => isViewed(cwd, viewed, f));
@@ -892,10 +1161,21 @@ class DiffTree {
       ];
     }
 
-    // Group or folder node: flat list, or one level of the folder tree when nested.
+    // Group or folder node: flat list (paged), or one level of the folder tree when nested.
     const files = el.files || [];
-    if (!this.nested) return files.map((f) => this._file(cwd, f, !!el.ignored));
-    return this._folderChildren(cwd, files, el.prefix || '', !!el.ignored);
+    if (this.nested) return this._folderChildren(cwd, files, el.prefix || '', !!el.ignored);
+
+    // Flat mode can be thousands of rows; page it so a huge PR stays responsive.
+    const key = el.contextValue || 'group';
+    const limit = this.pageLimits[key] || PAGE_SIZE;
+    const rows = files.slice(0, limit).map((f) => this._file(cwd, f, !!el.ignored));
+    if (files.length > limit) {
+      const more = new vscode.TreeItem(`Show ${Math.min(PAGE_SIZE, files.length - limit)} more… (${files.length - limit} hidden)`);
+      more.iconPath = new vscode.ThemeIcon('ellipsis');
+      more.command = { command: 'vetty.showMore', title: 'Show more', arguments: [key] };
+      rows.push(more);
+    }
+    return rows;
   }
 
   /** Immediate children (subfolders + files) of `prefix` within `files`, for the nested view. */
@@ -941,8 +1221,17 @@ class DiffTree {
 
   _file(cwd, rel, isIgnored) {
     const dir = path.dirname(rel);
-    const it = new vscode.TreeItem(path.basename(rel)); // filename first, like Source Control
-    it.description = this.nested || dir === '.' ? '' : dir; // dir shown by hierarchy when nested
+    const hits = this.searchMatches && this.searchMatches.get(rel);
+    const it = new vscode.TreeItem(
+      path.basename(rel), // filename first, like Source Control
+      hits ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None
+    );
+    const s = this.stat.get(rel);
+    const counts = s ? `+${s.add} −${s.del}` : ''; // triage signal: how big is this change
+    const dirPart = this.nested || dir === '.' ? '' : dir; // dir shown by hierarchy when nested
+    const matchPart = hits ? `${hits.length} match${hits.length === 1 ? '' : 'es'}` : '';
+    it.description = [matchPart, counts, dirPart].filter(Boolean).join('  ·  ');
+    if (hits) it.matches = hits; // makes the row expandable into its matching lines
     const viewed = isViewed(cwd, getViewed(this.context, this.base), rel);
     it.rel = rel;
     it.resourceUri = vscode.Uri.file(path.join(cwd, rel));
@@ -1056,8 +1345,9 @@ function openOneDiff(context, cwd, base, rel, opts) {
       'vscode.diff', blobUriFor(fileUri, blob), fileUri, `${rel} (since last review)`, opts
     );
   }
+  const ref = (diffTree && diffTree.baseRef) || base; // diff against the merge-base, not the base tip
   return vscode.commands.executeCommand(
-    'vscode.diff', baseUriFor(fileUri, base), fileUri, `${rel} (${base} ↔ working)`, opts
+    'vscode.diff', baseUriFor(fileUri, ref), fileUri, `${rel} (${base} ↔ working)`, opts
   );
 }
 
@@ -1095,11 +1385,84 @@ async function openNextUnviewed(context, base, cwd, justViewed) {
   const start = order.indexOf(justViewed);
   const next = order.slice(start + 1).concat(order.slice(0, start + 1)).find((f) => !isViewed(cwd, viewed, f));
   if (!next) return; // all viewed
-  if (diffTree.added.has(next) && !hasSinceReviewDiff(context, cwd, base, next)) {
-    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, next)), { preview: true });
+  await openReviewFile(context, cwd, base, next);
+}
+
+/** Open a changed file the right way: whole file for new files, else its diff. */
+async function openReviewFile(context, cwd, base, rel) {
+  if (diffTree.added.has(rel) && !hasSinceReviewDiff(context, cwd, base, rel)) {
+    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), { preview: true });
   } else {
-    await openOneDiff(context, cwd, base, next, { preview: true });
+    await openOneDiff(context, cwd, base, rel, { preview: true });
   }
+}
+
+/** j/k navigation: open the next/prev unviewed file relative to the active one. */
+async function navigateUnviewed(context, dir) {
+  const cwd = getCwd();
+  const base = diffTree?.base;
+  if (!cwd || !base) return;
+  const ignored = getIgnored(context, base);
+  const viewed = getViewed(context, base);
+  const unviewed = diffTree.files.filter((f) => !ignored.has(f) && !isViewed(cwd, viewed, f));
+  if (!unviewed.length) {
+    vscode.window.setStatusBarMessage('No unviewed files', 2000);
+    return;
+  }
+  const cur = activeRelPath(cwd);
+  const idx = cur ? unviewed.indexOf(cur) : -1;
+  const next =
+    idx >= 0 ? unviewed[(idx + dir + unviewed.length) % unviewed.length] : unviewed[dir > 0 ? 0 : unviewed.length - 1];
+  await openReviewFile(context, cwd, base, next);
+}
+
+/** Bridge review → SCM: git-add every file you've marked viewed, then commit in Source Control. */
+async function stageViewed(context) {
+  const cwd = getCwd();
+  const base = diffTree?.base;
+  if (!cwd || !base) return;
+  const viewed = getViewed(context, base);
+  const ignored = getIgnored(context, base);
+  const files = diffTree.files.filter((f) => !ignored.has(f) && isViewed(cwd, viewed, f));
+  if (!files.length) {
+    vscode.window.showInformationMessage('No viewed files to stage.');
+    return;
+  }
+  try {
+    await git(cwd, ['add', '--', ...files]);
+  } catch (e) {
+    vscode.window.showErrorMessage(`git add failed: ${e.message}`);
+    return;
+  }
+  vscode.window.showInformationMessage(`Staged ${files.length} viewed file(s). Commit them in Source Control.`);
+}
+
+/** git-add the selected file(s) — per-row / multi-select staging. */
+async function stageFiles(context, item, sel) {
+  const cwd = getCwd();
+  const rels = selectedRels(item, sel);
+  if (!cwd || !rels.length) return;
+  try {
+    await git(cwd, ['add', '--', ...rels]);
+  } catch (e) {
+    vscode.window.showErrorMessage(`git add failed: ${e.message}`);
+    return;
+  }
+  vscode.window.setStatusBarMessage(`Staged ${rels.length} file(s). Commit in Source Control.`, 2500);
+}
+
+/** Flip the PR-mode setting (the config listener handles cleanup if a review is active). */
+async function togglePrMode() {
+  const cfg = vscode.workspace.getConfiguration('vetty');
+  const next = !cfg.get('pullRequests.enabled', true);
+  await cfg.update('pullRequests.enabled', next, vscode.ConfigurationTarget.Global);
+  vscode.window.setStatusBarMessage(`PR mode ${next ? 'enabled' : 'disabled'}`, 2500);
+}
+
+function showMore(groupKey) {
+  if (!diffTree) return;
+  diffTree.pageLimits[groupKey] = (diffTree.pageLimits[groupKey] || PAGE_SIZE) + PAGE_SIZE;
+  diffTree.refresh();
 }
 
 async function toggleNesting(context) {
@@ -1108,6 +1471,172 @@ async function toggleNesting(context) {
   await context.workspaceState.update('vetty.nested', diffTree.nested);
   await vscode.commands.executeCommand('setContext', 'vetty.nested', diffTree.nested);
   refreshTree();
+}
+
+/** Reflect the active PR (if any) in the view title. */
+function updatePrTitle(context) {
+  if (!diffTreeView) return;
+  const st = context.workspaceState.get(REVIEW_KEY);
+  diffTreeView.title = st?.number ? `Review · PR #${st.number}` : 'Review';
+}
+
+/** Pick a teammate's open PR, check it out, and diff it against its (remote) base branch. */
+async function reviewPr(context) {
+  const cwd = getCwd();
+  if (!cwd) return;
+  if (!prEnabled()) {
+    vscode.window.showInformationMessage('PR review is disabled. Enable "Vetty › Pull Requests: Enabled" in settings.');
+    return;
+  }
+  if (!hasGh) {
+    vscode.window.showErrorMessage('PR review needs the GitHub CLI. Install `gh` and run `gh auth login`.');
+    return;
+  }
+  if ((await git(cwd, ['status', '--porcelain'])).trim()) {
+    vscode.window.showErrorMessage('Commit or stash your working changes before reviewing a PR.');
+    return;
+  }
+  // Feed the picker a promise so it opens instantly with a spinner instead of blocking on the network.
+  const itemsPromise = gh(cwd, ['pr', 'list', '--json', 'number,title,headRefName,baseRefName', '--limit', '50'])
+    .then((out) =>
+      JSON.parse(out).map((p) => ({
+        label: `#${p.number} ${p.title}`,
+        description: `${p.headRefName} → ${p.baseRefName}`,
+        pr: p,
+      }))
+    )
+    .catch((e) => {
+      vscode.window.showErrorMessage(`Could not list PRs: ${e.message}`);
+      return [];
+    });
+  const pick = await vscode.window.showQuickPick(itemsPromise, { placeHolder: 'Loading open PRs…' });
+  if (!pick) return;
+  const pr = pick.pr;
+
+  let original, prBranch, repo, headSha;
+  try {
+    original = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    await gh(cwd, ['pr', 'checkout', String(pr.number)]);
+    prBranch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    repo = JSON.parse(await gh(cwd, ['repo', 'view', '--json', 'nameWithOwner'])).nameWithOwner;
+    headSha = JSON.parse(await gh(cwd, ['pr', 'view', String(pr.number), '--json', 'headRefOid'])).headRefOid;
+    await git(cwd, ['fetch', 'origin', pr.baseRefName]); // ensure the base ref is current
+  } catch (e) {
+    vscode.window.showErrorMessage(`PR checkout failed: ${e.message}`);
+    return;
+  }
+
+  await context.workspaceState.update(REVIEW_KEY, { original, prBranch, number: pr.number, repo, headSha, baseRef: pr.baseRefName });
+  await context.workspaceState.update(LAST_BRANCH_KEY, `origin/${pr.baseRefName}`);
+  await vscode.commands.executeCommand('setContext', 'vetty.reviewing', true);
+  updateViewedContext(context);
+  updatePrTitle(context);
+  await fetchPrComments(cwd, repo, pr.number); // pull existing review comments into the gutter
+  for (const ed of vscode.window.visibleTextEditors) addPrThreads(ed.document);
+  await diffTree.load();
+  vscode.window.showInformationMessage(`Reviewing PR #${pr.number} vs origin/${pr.baseRefName}.`);
+}
+
+/** Return to the pre-review branch and delete the checked-out PR branch locally. */
+async function finishReview(context) {
+  const cwd = getCwd();
+  const st = context.workspaceState.get(REVIEW_KEY);
+  if (!cwd || !st?.prBranch) {
+    vscode.window.showInformationMessage('No active PR review.');
+    return;
+  }
+  const ok = await vscode.window.showWarningMessage(
+    `Finish review: return to "${st.original}" and delete local branch "${st.prBranch}"?`,
+    { modal: true },
+    'Delete branch'
+  );
+  if (ok !== 'Delete branch') return;
+  try {
+    await git(cwd, ['checkout', st.original]);
+    await git(cwd, ['branch', '-D', st.prBranch]);
+  } catch (e) {
+    vscode.window.showErrorMessage(`Cleanup failed (uncommitted changes?): ${e.message}`);
+    return;
+  }
+  await context.workspaceState.update(REVIEW_KEY, undefined);
+  await vscode.commands.executeCommand('setContext', 'vetty.reviewing', false);
+  clearPrThreads();
+  updatePrTitle(context);
+  await diffTree.load();
+  vscode.window.showInformationMessage(`Removed "${st.prBranch}", back on "${st.original}".`);
+}
+
+/** Post all local comments to the active PR as one GitHub review. */
+async function submitReview(context) {
+  const cwd = getCwd();
+  const st = context.workspaceState.get(REVIEW_KEY);
+  if (!cwd || !st?.number) {
+    vscode.window.showInformationMessage('Start a PR review first (Review Pull Request).');
+    return;
+  }
+  const stored = getComments(context); // keyed by current base = origin/<baseRef>
+  const comments = [];
+  for (const rel of Object.keys(stored)) {
+    for (const n of stored[rel] || []) {
+      const body = n.comments.join('\n\n').trim();
+      if (!body) continue;
+      const startLine = n.range[0] + 1;
+      const endLine = n.range[3] === 0 && n.range[2] > n.range[0] ? n.range[2] : n.range[2] + 1;
+      const c = { path: rel, line: endLine, side: 'RIGHT', body };
+      if (endLine > startLine) {
+        c.start_line = startLine;
+        c.start_side = 'RIGHT';
+      }
+      comments.push(c);
+    }
+  }
+  // Allow submitting an empty-comment review (pure approve / request-changes) too.
+  const eventPick = await vscode.window.showQuickPick(
+    [
+      { label: '$(comment) Comment', detail: `Post ${comments.length} comment(s), no verdict`, event: 'COMMENT' },
+      { label: '$(check) Approve', detail: 'Approve the PR' + (comments.length ? ` with ${comments.length} comment(s)` : ''), event: 'APPROVE' },
+      { label: '$(request-changes) Request changes', detail: 'Block the PR' + (comments.length ? ` with ${comments.length} comment(s)` : ''), event: 'REQUEST_CHANGES' },
+    ],
+    { placeHolder: `Submit review to PR #${st.number}` }
+  );
+  if (!eventPick) return;
+
+  let body = '';
+  if (eventPick.event !== 'COMMENT' || !comments.length) {
+    body = (await vscode.window.showInputBox({ prompt: 'Review summary (optional)', placeHolder: 'Overall comment…' })) ?? '';
+  }
+  const payload = { commit_id: st.headSha, event: eventPick.event, body, comments };
+  const tmp = path.join(os.tmpdir(), `vetty-review-${st.number}.json`);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(payload));
+    await gh(cwd, ['api', '--method', 'POST', `repos/${st.repo}/pulls/${st.number}/reviews`, '--input', tmp]);
+    const verb = { COMMENT: 'Commented on', APPROVE: 'Approved', REQUEST_CHANGES: 'Requested changes on' }[eventPick.event];
+    vscode.window.showInformationMessage(`${verb} PR #${st.number}${comments.length ? ` (${comments.length} comment(s))` : ''}.`);
+  } catch (e) {
+    // Most common cause: a comment sits on a line not part of the PR diff (GitHub 422).
+    vscode.window.showErrorMessage(`Submit failed: ${e.message}. Comments must be on lines changed in the PR.`);
+  } finally {
+    try { fs.unlinkSync(tmp); } catch {}
+  }
+}
+
+/** Fetch all remotes (so origin/* bases are current), then reload. */
+async function fetchAndRefresh(context) {
+  const cwd = getCwd();
+  if (!cwd) return;
+  await vscode.window.withProgress(
+    { location: { viewId: 'vettyView' }, title: 'Fetching…' },
+    async () => {
+      try {
+        await git(cwd, ['fetch', '--all', '--prune']);
+      } catch (e) {
+        vscode.window.showErrorMessage(`git fetch failed: ${e.message}`);
+        return;
+      }
+      await ensureDefaultBase(context);
+      await diffTree.load();
+    }
+  );
 }
 
 async function toggleSinceReview(context) {

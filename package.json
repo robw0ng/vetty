@@ -54,6 +54,7 @@
       },
       { "command": "vetty.treePickBranch", "title": "Change Branch", "icon": "$(git-branch)" },
       { "command": "vetty.treeRefresh", "title": "Refresh", "icon": "$(refresh)" },
+      { "command": "vetty.fetch", "title": "Fetch & Refresh", "category": "Vetty", "icon": "$(cloud-download)" },
       { "command": "vetty.treeOpenUnviewed", "title": "Open All Unviewed", "icon": "$(eye)" },
       { "command": "vetty.treeOpenFile", "title": "Open File", "icon": "$(go-to-file)" },
       { "command": "vetty.treeOpenDiff", "title": "Open as Diff", "icon": "$(git-compare)" },
@@ -65,7 +66,17 @@
       { "command": "vetty.viewAsList", "title": "View as List", "icon": "$(list-flat)" },
       { "command": "vetty.diffSinceReview", "title": "Diffing Full (click for Since Last Review)", "icon": "$(history)" },
       { "command": "vetty.diffFull", "title": "Diffing Since Last Review (click for Full)", "icon": "$(git-compare)" },
+      { "command": "vetty.reviewPr", "title": "Review Pull Request", "category": "Vetty", "icon": "$(git-pull-request)" },
+      { "command": "vetty.finishReview", "title": "Finish Review (delete PR branch)", "category": "Vetty", "icon": "$(sign-out)" },
+      { "command": "vetty.submitReview", "title": "Submit Review to PR", "category": "Vetty", "icon": "$(comment-discussion)" },
+      { "command": "vetty.togglePrMode", "title": "Toggle PR Mode", "category": "Vetty" },
+      { "command": "vetty.stageViewed", "title": "Stage Viewed Files", "category": "Vetty", "icon": "$(add)" },
+      { "command": "vetty.stageFile", "title": "Stage", "icon": "$(add)" },
       { "command": "vetty.copyPaths", "title": "Copy Path(s)" },
+      { "command": "vetty.showMore", "title": "Show More Files" },
+      { "command": "vetty.nextUnviewed", "title": "Open Next Unviewed File", "category": "Vetty" },
+      { "command": "vetty.prevUnviewed", "title": "Open Previous Unviewed File", "category": "Vetty" },
+      { "command": "vetty.viewCurrent", "title": "Toggle Viewed (active file)", "category": "Vetty" },
       { "command": "vetty.treeOpenGroup", "title": "Open All in Group", "icon": "$(go-to-file)" },
       { "command": "vetty.treeMarkAllViewed", "title": "View All", "icon": "$(eye-closed)" },
       { "command": "vetty.treeMarkAllUnviewed", "title": "Unview All", "icon": "$(eye)" },
@@ -101,14 +112,18 @@
         }
       ],
       "view/title": [
-        { "command": "vetty.treePickBranch", "when": "view == vettyView", "group": "navigation@1" },
-        { "command": "vetty.treeRefresh", "when": "view == vettyView", "group": "navigation@2" },
-        { "command": "vetty.diffFull", "when": "view == vettyView && vetty.sinceReview", "group": "navigation@3" },
-        { "command": "vetty.diffSinceReview", "when": "view == vettyView && !vetty.sinceReview", "group": "navigation@3" },
-        { "command": "vetty.viewAsTree", "when": "view == vettyView && !vetty.nested", "group": "navigation@4" },
-        { "command": "vetty.viewAsList", "when": "view == vettyView && vetty.nested", "group": "navigation@4" },
-        { "command": "vetty.exportComments", "when": "view == vettyView", "group": "navigation@5" },
-        { "command": "vetty.clearComments", "when": "view == vettyView", "group": "navigation@6" }
+        { "command": "vetty.reviewPr", "when": "view == vettyView && vetty.prMode && !vetty.reviewing", "group": "navigation@0" },
+        { "command": "vetty.submitReview", "when": "view == vettyView && vetty.reviewing", "group": "navigation@0" },
+        { "command": "vetty.finishReview", "when": "view == vettyView && vetty.reviewing", "group": "navigation@1" },
+        { "command": "vetty.treePickBranch", "when": "view == vettyView", "group": "navigation@2" },
+        { "command": "vetty.treeRefresh", "when": "view == vettyView", "group": "navigation@3" },
+        { "command": "vetty.diffFull", "when": "view == vettyView && vetty.sinceReview", "group": "navigation@4" },
+        { "command": "vetty.diffSinceReview", "when": "view == vettyView && !vetty.sinceReview", "group": "navigation@4" },
+        { "command": "vetty.fetch", "when": "view == vettyView", "group": "1_more@2" },
+        { "command": "vetty.viewAsTree", "when": "view == vettyView && !vetty.nested", "group": "1_more@3" },
+        { "command": "vetty.viewAsList", "when": "view == vettyView && vetty.nested", "group": "1_more@3" },
+        { "command": "vetty.exportComments", "when": "view == vettyView", "group": "1_more@4" },
+        { "command": "vetty.clearComments", "when": "view == vettyView", "group": "1_more@5" }
       ],
       "view/item/context": [
         {
@@ -125,6 +140,11 @@
           "command": "vetty.treeMarkAllUnviewed",
           "when": "view == vettyView && viewItem == group-viewed",
           "group": "inline@1"
+        },
+        {
+          "command": "vetty.stageViewed",
+          "when": "view == vettyView && viewItem == group-viewed",
+          "group": "inline@2"
         },
         {
           "command": "vetty.treeIgnore",
@@ -150,6 +170,16 @@
           "command": "vetty.treeUnview",
           "when": "view == vettyView && viewItem == file-viewed",
           "group": "inline@3"
+        },
+        {
+          "command": "vetty.stageFile",
+          "when": "view == vettyView && viewItem == file-viewed",
+          "group": "inline@4"
+        },
+        {
+          "command": "vetty.stageFile",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "navigation@5"
         },
         {
           "command": "vetty.treeOpenDiff",
@@ -225,16 +255,31 @@
         { "command": "vetty.deleteComment", "when": "false" },
         { "command": "vetty.copyComment", "when": "false" },
         { "command": "vetty.copyPaths", "when": "false" },
-        { "command": "vetty.openTodo", "when": "false" }
+        { "command": "vetty.showMore", "when": "false" },
+        { "command": "vetty.stageFile", "when": "false" },
+        { "command": "vetty.openTodo", "when": "false" },
+        { "command": "vetty.reviewPr", "when": "vetty.prMode" },
+        { "command": "vetty.finishReview", "when": "vetty.reviewing" },
+        { "command": "vetty.submitReview", "when": "vetty.reviewing" },
+        { "command": "vetty.nextUnviewed", "when": "false" },
+        { "command": "vetty.prevUnviewed", "when": "false" }
       ]
     },
     "keybindings": [
-      {
-        "command": "vetty.copyPaths",
-        "key": "ctrl+c",
-        "mac": "cmd+c",
-        "when": "focusedView == vettyView"
+      { "command": "vetty.copyPaths", "key": "ctrl+c", "mac": "cmd+c", "when": "focusedView == vettyView" },
+      { "command": "vetty.nextUnviewed", "key": "j", "when": "focusedView == vettyView" },
+      { "command": "vetty.prevUnviewed", "key": "k", "when": "focusedView == vettyView" },
+      { "command": "vetty.viewCurrent", "key": "v", "when": "focusedView == vettyView" }
+    ],
+    "configuration": {
+      "title": "Vetty",
+      "properties": {
+        "vetty.pullRequests.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable GitHub pull request review (checkout PRs, submit reviews). Requires the GitHub CLI `gh`. Turn off to keep Vetty purely local."
+        }
       }
-    ]
+    }
   }
 }
