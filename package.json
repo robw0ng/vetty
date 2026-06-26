@@ -64,6 +64,8 @@
       { "command": "vetty.treeUnignore", "title": "Track File", "icon": "$(check)" },
       { "command": "vetty.viewAsTree", "title": "View as Tree", "icon": "$(list-tree)" },
       { "command": "vetty.viewAsList", "title": "View as List", "icon": "$(list-flat)" },
+      { "command": "vetty.hideWhitespace", "title": "Hide Whitespace-Only Changes", "category": "Vetty", "icon": "$(whitespace)" },
+      { "command": "vetty.showWhitespace", "title": "Show Whitespace-Only Changes", "category": "Vetty", "icon": "$(whitespace)" },
       { "command": "vetty.diffSinceReview", "title": "Diffing Full (click for Since Last Review)", "icon": "$(history)" },
       { "command": "vetty.diffFull", "title": "Diffing Since Last Review (click for Full)", "icon": "$(git-compare)" },
       { "command": "vetty.reviewPr", "title": "Review Pull Request", "category": "Vetty", "icon": "$(git-pull-request)" },
@@ -122,6 +124,8 @@
         { "command": "vetty.fetch", "when": "view == vettyView", "group": "1_more@2" },
         { "command": "vetty.viewAsTree", "when": "view == vettyView && !vetty.nested", "group": "1_more@3" },
         { "command": "vetty.viewAsList", "when": "view == vettyView && vetty.nested", "group": "1_more@3" },
+        { "command": "vetty.hideWhitespace", "when": "view == vettyView && !vetty.hideWhitespace", "group": "1_more@3b" },
+        { "command": "vetty.showWhitespace", "when": "view == vettyView && vetty.hideWhitespace", "group": "1_more@3b" },
         { "command": "vetty.exportComments", "when": "view == vettyView", "group": "1_more@4" },
         { "command": "vetty.clearComments", "when": "view == vettyView", "group": "1_more@5" }
       ],
@@ -276,8 +280,8 @@
       "properties": {
         "vetty.pullRequests.enabled": {
           "type": "boolean",
-          "default": true,
-          "description": "Enable GitHub pull request review (checkout PRs, submit reviews). Requires the GitHub CLI `gh`. Turn off to keep Vetty purely local."
+          "default": false,
+          "description": "Experimental: enable GitHub pull request review (checkout PRs, see/submit reviews). Off by default. Requires the GitHub CLI `gh`."
         }
       }
     }

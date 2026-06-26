@@ -118,7 +118,7 @@ async function gh(cwd, args) {
 }
 let hasGh = false; // gh installed + authed
 function prEnabled() {
-  return vscode.workspace.getConfiguration('vetty').get('pullRequests.enabled', true);
+  return vscode.workspace.getConfiguration('vetty').get('pullRequests.enabled', false); // experimental, opt-in
 }
 async function updatePrMode() {
   // PR features require both the setting AND a working gh.
@@ -354,7 +354,8 @@ function lineRef(sLine, eLine, eChar) {
   return start === last ? `${start}` : `${start}-${last}`;
 }
 
-/** Reserialize all live threads back to workspaceState as { relPath: [{range, comments}] }. */
+/** Reserialize all live threads back to workspaceState. `anchor` = the start line's text, so the
+ *  comment can re-find its line if the file is later rewritten (e.g. by an AI edit). */
 async function persistComments(context) {
   const cwd = getCwd();
   const map = {};
@@ -362,12 +363,28 @@ async function persistComments(context) {
     if (t.isPr) continue; // never persist pulled-from-PR threads as local comments
     const rel = t.dbRel || (cwd && relOf(cwd, t.uri));
     if (!rel || !t.comments.length) continue;
+    const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === t.uri.toString());
+    const anchor = open && t.range.start.line < open.lineCount ? open.lineAt(t.range.start.line).text.trim() : '';
     (map[rel] ||= []).push({
       range: [t.range.start.line, t.range.start.character, t.range.end.line, t.range.end.character],
+      anchor,
       comments: t.comments.map(bodyText),
     });
   }
   await context.workspaceState.update(COMMENTS_KEY, map);
+}
+
+/** Find which line `anchor` is on now — the stored line if unchanged, else the nearest line that matches. */
+function relocateLine(doc, storedLine, anchor) {
+  if (!anchor) return storedLine; // no/empty anchor → can't relocate reliably
+  if (storedLine < doc.lineCount && doc.lineAt(storedLine).text.trim() === anchor) return storedLine;
+  for (let d = 1; d < doc.lineCount; d++) {
+    const dn = storedLine + d;
+    const up = storedLine - d;
+    if (dn < doc.lineCount && doc.lineAt(dn).text.trim() === anchor) return dn;
+    if (up >= 0 && doc.lineAt(up).text.trim() === anchor) return up;
+  }
+  return storedLine; // anchor gone (line deleted/changed) → keep original position
 }
 
 /** Recreate stored threads for a document the first time it opens this session. */
@@ -380,7 +397,9 @@ function hydrateComments(context, doc) {
   const rel = relOf(cwd, doc.uri);
   if (!rel) return;
   for (const n of getComments(context)[rel] || []) {
-    const range = new vscode.Range(n.range[0], n.range[1], n.range[2], n.range[3]);
+    const start = relocateLine(doc, n.range[0], n.anchor); // re-find the line if the file changed
+    const delta = start - n.range[0];
+    const range = new vscode.Range(start, n.range[1], n.range[2] + delta, n.range[3]);
     const thread = commentController.createCommentThread(doc.uri, range, n.comments.map(makeComment));
     thread.dbRel = rel;
     thread.contextValue = 'hasComment'; // gates the Delete Comment button (not shown on empty drafts)
@@ -550,6 +569,8 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.togglePrMode', () => togglePrMode()),
     vscode.commands.registerCommand('vetty.stageViewed', () => stageViewed(context)),
     vscode.commands.registerCommand('vetty.stageFile', (item, sel) => stageFiles(context, item, sel)),
+    vscode.commands.registerCommand('vetty.hideWhitespace', () => toggleWhitespace(context)),
+    vscode.commands.registerCommand('vetty.showWhitespace', () => toggleWhitespace(context)),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (!e.affectsConfiguration('vetty.pullRequests.enabled')) return;
       await updatePrMode();
@@ -587,6 +608,7 @@ function activate(context) {
 
   vscode.commands.executeCommand('setContext', 'vetty.nested', diffTree.nested);
   vscode.commands.executeCommand('setContext', 'vetty.sinceReview', sinceReviewMode(context));
+  vscode.commands.executeCommand('setContext', 'vetty.hideWhitespace', diffTree.hideWhitespace);
   vscode.commands.executeCommand('setContext', 'vetty.reviewing', !!context.workspaceState.get(REVIEW_KEY));
   updatePrTitle(context);
 
@@ -1021,6 +1043,8 @@ class DiffTree {
     this.nameFilter = ''; // lowercased filename filter; '' = show all
     this.scope = 'all'; // all | unviewed | added | modified — scope chips in the Search panel
     this.searchMatches = null; // null = no text search; else Map rel → [{line, text}] (filters the tree)
+    this.realChanged = new Set(); // files with non-whitespace changes (git diff -w)
+    this.hideWhitespace = !!context.workspaceState.get('vetty.hideWhitespace');
     this.nested = !!context.workspaceState.get('vetty.nested'); // folder tree vs flat list
     this.pageLimits = {}; // per-group shown-row cap for the flat view (huge-PR paging)
     this.baseRef = this.base; // merge-base of base+HEAD (resolved in load); what we actually diff against
@@ -1029,6 +1053,8 @@ class DiffTree {
   /** True if `rel` passes the active name filter + scope chip (+ text-search match set). */
   _matches(cwd, viewed, rel) {
     if (this.searchMatches && !this.searchMatches.has(rel)) return false;
+    // Whitespace-only modified files: present in the full diff but absent from `git diff -w`.
+    if (this.hideWhitespace && this.status.get(rel) !== 'U' && !this.realChanged.has(rel)) return false;
     if (this.nameFilter && !rel.toLowerCase().includes(this.nameFilter)) return false;
     switch (this.scope) {
       case 'unviewed':
@@ -1061,6 +1087,7 @@ class DiffTree {
     const added = new Set();
     const status = new Map();
     const stat = new Map();
+    const realChanged = new Set();
     if (cwd && this.base) {
       try {
         const out = await git(cwd, ['diff', '--name-status', '--diff-filter=d', this.baseRef]);
@@ -1080,6 +1107,11 @@ class DiffTree {
           const m = line.match(/^(\d+)\t(\d+)\t(.+)$/);
           if (m) stat.set(m[3].trim(), { add: +m[1], del: +m[2] });
         }
+        // Files with real (non-whitespace) changes — anything else is formatting-only.
+        for (const r of (await git(cwd, ['diff', '--name-only', '-w', '--diff-filter=d', this.baseRef])).split('\n')) {
+          const rel = r.trim();
+          if (rel) realChanged.add(rel);
+        }
         for (const rel of await untrackedFiles(cwd)) {
           if (status.has(rel)) continue;
           files.push(rel);
@@ -1094,6 +1126,7 @@ class DiffTree {
     this.added = added;
     this.status = status;
     this.stat = stat;
+    this.realChanged = realChanged;
     this.refresh();
     this.updateProgress();
     postSearchCounts();
@@ -1470,6 +1503,14 @@ async function toggleNesting(context) {
   diffTree.nested = !diffTree.nested;
   await context.workspaceState.update('vetty.nested', diffTree.nested);
   await vscode.commands.executeCommand('setContext', 'vetty.nested', diffTree.nested);
+  refreshTree();
+}
+
+async function toggleWhitespace(context) {
+  if (!diffTree) return;
+  diffTree.hideWhitespace = !diffTree.hideWhitespace;
+  await context.workspaceState.update('vetty.hideWhitespace', diffTree.hideWhitespace);
+  await vscode.commands.executeCommand('setContext', 'vetty.hideWhitespace', diffTree.hideWhitespace);
   refreshTree();
 }
 

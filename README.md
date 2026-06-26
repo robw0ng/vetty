@@ -29,13 +29,14 @@ what changed since your last pass.
 | **Scope chips** | Narrow the tree to All / Unviewed / Added / Modified | One click to "just what I haven't reviewed" |
 | **Filename filter** | Live-filter the tree by name, with match count + clear | Jump to a file in a huge diff |
 | **Text search** | Searches the shown files (case/word/regex); matches fold into the Review tree | Find code without leaving the panel — rows expand to matching lines |
-| **Inline comments** | Leave PR-style notes on lines; they persist | Jot review thoughts right where they belong |
+| **Inline comments** | PR-style notes on lines; persist and re-anchor by content when a file is rewritten | Notes survive AI edits instead of drifting |
+| **Hide whitespace-only** | Drop files whose only change is formatting | Real changes stop hiding in reformat noise |
 | **Copy / export comments** | Copy one or all as `file:line(s) — note` (spans multi-line ranges) | Paste into AI chat or a ticket |
 | **TODO scanner** | Lists new TODO/FIXME/etc added in the branch | Catch leftover markers before they ship |
 | **Auto-refresh** | Reloads on any file/git change (incl. AI edits) | Tree stays current, no manual refresh |
 | **Open file / diff** | One click per row, or all-in-group | Get into the actual review fast |
 | **Merge-base diff + fetch** | Diffs against the merge-base (like GitHub's "files changed"); Fetch button updates remotes | Accurate change list even when the base has moved on |
-| **PR review** *(needs `gh`)* | Check out a teammate's PR, see its existing comments inline, submit Comment/Approve/Request-changes back | Full two-way PR review without leaving the editor |
+| **PR review** *(experimental, off by default; needs `gh`)* | Check out a teammate's PR, see its existing comments inline, submit Comment/Approve/Request-changes back | Full two-way PR review without leaving the editor |
 | **Line counts** | `+42 −7` per file row | Triage which file to review first |
 | **Stage viewed** | One click stages every file you marked viewed | Bridge from review straight to a commit |
 | **Review-complete** | Title shows `✓ all N reviewed` when done | Know when you've covered everything |
@@ -65,8 +66,8 @@ teammate PRs end to end:
    post to the PR as one review.
 4. **Finish Review** → returns to your previous branch and deletes the local PR branch.
 
-PR features only appear when `gh` is available. Turn them off entirely with the setting
-`vetty.pullRequests.enabled: false` to keep Vetty purely local.
+PR review is **experimental and off by default**. Turn on `vetty.pullRequests.enabled` (and have
+`gh` installed/authenticated) to try it; otherwise Vetty stays purely local.
 
 ## Keyboard (when the Review view is focused)
 
