@@ -1,0 +1,5 @@
+node_modules/
+
+# Build output — keep the dist/ folder in the repo, ignore the binaries inside it.
+dist/*
+!dist/.gitkeep

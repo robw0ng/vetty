@@ -11,36 +11,40 @@ what changed since your last pass.
 
 ## Features
 
-| Feature | What it does | Why it helps |
-|---|---|---|
-| **Diff vs branch** | Lists every file changed vs a branch you pick | See the whole scope of work in one place |
-| **Diff working changes** | Pick your current branch → shows just uncommitted edits | Review your own work before committing |
-| **Auto base branch** | Infers the current branch's direct parent (closest ancestor); picker labels parent/ancestor/descendant/diverged | Diffs against the right base with no setup |
-| **Viewed tracking** | Mark files viewed; edit one and it auto-flags unviewed again | Always know what you've actually looked at |
-| **Progress count** | Shows `3/12 viewed` by the title | See review completeness at a glance |
-| **Auto-advance** | Mark viewed → next unviewed file opens automatically | Blow through a review without clicking around |
-| **Since-last-review diff** | Unviewed files diff against the version you last reviewed | Only see *new* changes, not the whole file again |
-| **Diff-mode toggle** | Flip between since-review and full-vs-base diff | Pick the view you need per moment |
-| **Status badges** | `A`/`M`/`U`/`R` colored marks like Source Control | Spot adds vs edits vs new files instantly |
-| **Untracked files** | New uncommitted files show too (`U`) | Nothing slips through unreviewed |
-| **Track / Untrack** | Push noise files (lockfiles, generated) into their own section | Focus only on what matters |
-| **Folder vs flat toggle** | Switch between nested folders and a flat file list | Flat for small diffs, nested for big ones |
-| **Multi-select** | Shift/Ctrl-click files → bulk view/untrack/open | Act on many files at once |
-| **Scope chips** | Narrow the tree to All / Unviewed / Added / Modified | One click to "just what I haven't reviewed" |
-| **Filename filter** | Live-filter the tree by name, with match count + clear | Jump to a file in a huge diff |
-| **Text search** | Searches the shown files (case/word/regex); matches fold into the Review tree | Find code without leaving the panel — rows expand to matching lines |
-| **Inline comments** | PR-style notes on lines; persist and re-anchor by content when a file is rewritten | Notes survive AI edits instead of drifting |
-| **Hide whitespace-only** | Drop files whose only change is formatting | Real changes stop hiding in reformat noise |
-| **Copy / export comments** | Copy one or all as `file:line(s) — note` (spans multi-line ranges) | Paste into AI chat or a ticket |
-| **TODO scanner** | Lists new TODO/FIXME/etc added in the branch | Catch leftover markers before they ship |
-| **Auto-refresh** | Reloads on any file/git change (incl. AI edits) | Tree stays current, no manual refresh |
-| **Open file / diff** | One click per row, or all-in-group | Get into the actual review fast |
-| **Merge-base diff + fetch** | Diffs against the merge-base (like GitHub's "files changed"); Fetch button updates remotes | Accurate change list even when the base has moved on |
-| **PR review** *(experimental, off by default; needs `gh`)* | Check out a teammate's PR, see its existing comments inline, submit Comment/Approve/Request-changes back | Full two-way PR review without leaving the editor |
-| **Line counts** | `+42 −7` per file row | Triage which file to review first |
-| **Stage viewed** | One click stages every file you marked viewed | Bridge from review straight to a commit |
-| **Review-complete** | Title shows `✓ all N reviewed` when done | Know when you've covered everything |
-| **Copy paths / keys** | Ctrl+C copies selected paths; `j`/`k` next/prev unviewed, `v` toggle | Fast keyboard-driven review |
+| Feature                                                    | What it does                                                                                                | Why it helps                                   |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **Review changed files**                                   | Every file changed vs a branch or your working tree, grouped Unviewed / Viewed / Untracked                  | The whole scope of work in one place           |
+| **Auto base branch**                                       | Infers the current branch's direct parent (closest ancestor); merge-base diff like GitHub's "files changed" | Right base, accurate change list, no setup     |
+| **Viewed tracking**                                        | Mark files viewed; edit one and it re-flags unviewed (content-hash); progress + auto-advance                | Always know what you've actually reviewed      |
+| **Since-last-review diff**                                 | Unviewed files diff against the version you last reviewed                                                   | See only what's*new*, not the whole file again |
+| **Inline comments**                                        | PR-style notes that persist and re-anchor by content when a file is rewritten                               | Notes survive AI edits instead of drifting     |
+| **In-panel text search**                                   | Search the shown files (case/word/regex); matches fold into the tree, click to jump                         | Find code without leaving the review           |
+| **Scope chips**                                            | Narrow to All / Unviewed / Added / Modified                                                                 | One click to "just what I haven't reviewed"    |
+| **Hide whitespace-only**                                   | Drop files whose only change is formatting                                                                  | Real changes stop hiding in reformat noise     |
+| **Track / Untrack**                                        | Push noise files (lockfiles, generated) into their own section                                              | Focus only on what matters                     |
+| **TODO scanner**                                           | Lists new TODO/FIXME/etc added in the branch                                                                | Catch leftover markers before they ship        |
+| **Auto-refresh**                                           | Reloads on any file/git change, including AI edits with no save                                             | Tree stays current, no manual refresh          |
+| **Stage viewed**                                           | One click stages every file you marked viewed                                                               | Bridge from review straight to a commit        |
+| **PR review** _(experimental, off by default; needs `gh`)_ | Check out a PR, see its comments inline, submit Comment/Approve/Request-changes                             | Two-way PR review without leaving the editor   |
+
+## For AI pair programming
+
+When an agent edits your code, you didn't write it — so you have to vet it, fast, often, and again
+after every revision. Vetty is built for exactly that loop (ordered by what matters most):
+
+| The AI-pairing problem                                        | How Vetty helps                                                                                                                        |
+| ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent touched 30 files — what did it actually change?         | **Review tree** shows the full changed set vs the parent branch, grouped by review state.                                              |
+| It rewrote files again — re-reading everything is exhausting. | **Since-last-review diff** shows only what changed since your last pass, not the whole file.                                           |
+| I want the agent to fix what I flagged.                       | Comment on the code it wrote, then**Export Comments** copies them all as `file:line — note` — paste straight into the agent to action. |
+| Did I actually look at all of it?                             | **Viewed tracking** re-flags any file the agent re-touches as unviewed; **auto-advance** + progress keep you moving.                   |
+| My review notes vanish when the agent rewrites the file.      | **Content-anchored comments** re-find their line across rewrites instead of drifting.                                                  |
+| The real change is buried in reformatting.                    | **Hide whitespace-only** drops pure-format churn so logic stands out.                                                                  |
+| The agent edits on disk with no save event.                   | **Auto-refresh** reacts to any file change, including out-of-editor edits.                                                             |
+| Leftover debug markers slip through.                          | **TODO scanner** lists new TODO/FIXME the branch introduced.                                                                           |
+
+**The loop:** review the agent's code → comment the lines you want changed → **Export Comments** →
+paste back → the agent fixes exactly those → **since-last-review** shows you only what it touched.
 
 ## Getting started
 
