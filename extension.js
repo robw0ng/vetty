@@ -142,11 +142,10 @@ const REVIEW_KEY = 'vetty.review'; // { original, prBranch, number, repo, headSh
 // Case-sensitive (uppercase) so prose words like "note"/"bug" don't false-positive.
 const TODO_RE = /\b(TODO|FIXME|HACK|XXX|BUG|NOTE|OPTIMIZE|REVIEW|WIP|TEMP|REFACTOR|DEPRECATED)\b/;
 
-/** TODO/FIXME markers introduced vs base: added diff lines + every line of untracked files. */
-async function findTodos(cwd, base) {
+/** TODO/FIXME markers on added diff lines vs `ref` + every line of untracked files. */
+async function findTodos(cwd, ref) {
   let out = '';
   try {
-    const ref = await mergeBaseRef(cwd, base); // markers this branch added, not the base's
     out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
   } catch {
     return [];
@@ -365,6 +364,9 @@ const prBuiltDocs = new Set();
 
 function getComments(context) {
   return context.workspaceState.get(COMMENTS_KEY) || {};
+}
+function commentCount(context) {
+  return Object.values(getComments(context)).reduce((n, arr) => n + (arr?.length || 0), 0);
 }
 function relOf(cwd, uri) {
   if (uri.scheme !== 'file') return null;
@@ -597,8 +599,11 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.addToGroup', (item, sel) => addToGroup(context, item, sel)),
     vscode.commands.registerCommand('vetty.removeFromGroup', (item, sel) => removeFromGroup(context, item, sel)),
     vscode.commands.registerCommand('vetty.stageGroup', () => stageGroup(context)),
+    vscode.commands.registerCommand('vetty.markGroupViewed', () => markGroupViewed(context)),
+    vscode.commands.registerCommand('vetty.openGroup', () => openGroup(context)),
     vscode.commands.registerCommand('vetty.ungroup', () => ungroup(context)),
     vscode.commands.registerCommand('vetty.clearGroups', () => clearGroups(context)),
+    vscode.commands.registerCommand('vetty.collapseAll', () => vscode.commands.executeCommand('workbench.actions.treeView.vettyView.collapseAll')),
     vscode.commands.registerCommand('vetty.hideWhitespace', () => toggleWhitespace(context)),
     vscode.commands.registerCommand('vetty.showWhitespace', () => toggleWhitespace(context)),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
@@ -904,14 +909,21 @@ function postSearchCounts() {
   postGroups();
 }
 
-/** Push the list of group names (+ active filter) to the Search panel's group dropdown. */
+/** Push group names (with viewed/total counts) + the active filter to the Search panel dropdown. */
 function postGroups() {
   if (!searchWebview || !diffTree || !diffTree.base) return;
-  const names = groupNames(getGroups(diffTree.context, diffTree.base));
-  // Drop any active filter names whose group no longer exists.
+  const cwd = getCwd();
+  const map = getGroups(diffTree.context, diffTree.base);
+  const viewed = getViewed(diffTree.context, diffTree.base);
+  const names = groupNames(map);
+  const groups = names.map((name) => {
+    const files = Object.keys(map).filter((r) => map[r] === name);
+    const vw = cwd ? files.filter((f) => isViewed(cwd, viewed, f)).length : 0;
+    return { name, total: files.length, viewed: vw };
+  });
   const active = (diffTree.groupFilter || []).filter((n) => names.includes(n));
   diffTree.groupFilter = active.length ? active : null;
-  searchWebview.postMessage({ type: 'groups', names, active });
+  searchWebview.postMessage({ type: 'groups', groups, active });
 }
 
 
@@ -997,6 +1009,7 @@ class SearchView {
   }
   .dd-btn:focus { outline: none; border-color: var(--vscode-focusBorder); }
   .dd-btn .chev { opacity: .7; }
+  .gmenu { flex: 0 0 auto; width: 30px; justify-content: center; }
   .dd-panel {
     position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 5;
     background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, var(--vscode-contrastBorder, #555));
@@ -1010,6 +1023,7 @@ class SearchView {
   .dd-panel label:hover { background: var(--vscode-list-hoverBackground); }
   .dd-panel input { flex: 0 0 auto; width: auto; margin: 0; accent-color: var(--vscode-inputOption-activeBackground); }
   .dd-panel label span { flex: 1; text-align: left; }
+  .dd-panel label .gcount { flex: 0 0 auto; opacity: .6; font-size: 11px; }
   .dd-empty { color: var(--vscode-descriptionForeground); font-size: 11px; padding: 4px; }
   #filter { padding-right: 24px; }
   #search { padding-right: 100px; }
@@ -1072,8 +1086,9 @@ class SearchView {
   </div>
   <div class="field" id="group-field">
     <label>Groups <span class="count">none = all</span></label>
-    <div class="dropdown">
-      <button type="button" class="dd-btn" id="group-btn"><span id="group-label">All groups</span><span class="chev">▾</span></button>
+    <div class="dropdown" style="display:flex; gap:4px;">
+      <button type="button" class="dd-btn" id="group-btn" style="flex:1"><span id="group-label">All groups</span><span class="chev">▾</span></button>
+      <button type="button" class="dd-btn gmenu" id="group-menu" title="Group actions">⋯</button>
       <div class="dd-panel" id="group-panel" hidden></div>
     </div>
   </div>
@@ -1083,6 +1098,7 @@ class SearchView {
     const fClear = document.getElementById('f-clear'), sClear = document.getElementById('s-clear');
     const count = document.getElementById('count');
     const groupBtn = document.getElementById('group-btn'), groupPanel = document.getElementById('group-panel'), groupLabel = document.getElementById('group-label');
+    document.getElementById('group-menu').addEventListener('click', () => vscode.postMessage({ type: 'groupMenu' }));
     const esc = (n) => n.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     const groupSummary = (a) => (!a.length ? 'All groups' : a.length === 1 ? a[0] : a.length + ' groups');
     const chips = [...document.querySelectorAll('.chip')];
@@ -1114,9 +1130,9 @@ class SearchView {
     window.addEventListener('message', (e) => {
       if (e.data?.type === 'counts') count.textContent = e.data.total ? (e.data.shown === e.data.total ? e.data.total + ' files' : e.data.shown + ' of ' + e.data.total) : '';
       else if (e.data?.type === 'groups') {
-        const names = e.data.names || [], active = e.data.active || [];
-        groupPanel.innerHTML = names.length
-          ? names.map((n) => '<label><input type="checkbox" value="' + esc(n) + '"' + (active.includes(n) ? ' checked' : '') + '><span>' + esc(n) + '</span></label>').join('')
+        const groups = e.data.groups || [], active = e.data.active || [];
+        groupPanel.innerHTML = groups.length
+          ? groups.map((g) => '<label><input type="checkbox" value="' + esc(g.name) + '"' + (active.includes(g.name) ? ' checked' : '') + '><span>' + esc(g.name) + '</span><span class="gcount">' + g.viewed + '/' + g.total + '</span></label>').join('')
           : '<div class="dd-empty">No groups yet</div>';
         groupLabel.textContent = groupSummary(active);
       }
@@ -1127,7 +1143,23 @@ class SearchView {
   </script>
 </body></html>`;
     postSearchCounts(); // seed counts + group dropdown now that the webview is live
-    view.webview.onDidReceiveMessage((m) => {
+    view.webview.onDidReceiveMessage(async (m) => {
+      if (m.type === 'groupMenu') {
+        const sel = diffTree?.groupFilter || [];
+        const scope = sel.length ? (sel.length === 1 ? `"${sel[0]}"` : `${sel.length} selected groups`) : 'a group…';
+        const a = await vscode.window.showQuickPick(
+          [
+            { label: `$(layers) Stage ${scope}`, cmd: 'vetty.stageGroup' },
+            { label: `$(go-to-file) Open ${scope}`, cmd: 'vetty.openGroup' },
+            { label: `$(eye-closed) Mark ${scope} viewed`, cmd: 'vetty.markGroupViewed' },
+            { label: `$(close) Ungroup ${scope}`, cmd: 'vetty.ungroup' },
+            { label: '$(clear-all) Ungroup all', cmd: 'vetty.clearGroups' },
+          ],
+          { placeHolder: sel.length ? `Acting on ${scope}` : 'Group actions (pick a group next)' }
+        );
+        if (a) vscode.commands.executeCommand(a.cmd);
+        return;
+      }
       if (m.type === 'filter') {
         diffTree.nameFilter = (m.value || '').trim().toLowerCase();
         refreshTree();
@@ -1208,6 +1240,8 @@ class DiffTree {
     const cwd = getCwd();
     this.base = lastBranch(this.context);
     this.baseRef = cwd && this.base ? await mergeBaseRef(cwd, this.base) : this.base;
+    // In "since last commit" mode, list working-tree-vs-HEAD (like Source Control); else the branch's changes.
+    this.listRef = diffMode(this.context) === 'commit' ? 'HEAD' : this.baseRef;
     const files = [];
     const added = new Set();
     const status = new Map();
@@ -1215,7 +1249,7 @@ class DiffTree {
     const realChanged = new Set();
     if (cwd && this.base) {
       try {
-        const out = await git(cwd, ['diff', '--name-status', '--diff-filter=d', this.baseRef]);
+        const out = await git(cwd, ['diff', '--name-status', '--diff-filter=d', this.listRef]);
         for (const line of out.split('\n')) {
           const parts = line.split('\t');
           if (parts.length < 2) continue;
@@ -1227,10 +1261,10 @@ class DiffTree {
           if (letter === 'A') added.add(rel);
         }
         // +/- line counts (binary files report "-\t-"); skipped silently.
-        const ns = await git(cwd, ['diff', '--numstat', '--diff-filter=d', this.baseRef]);
+        const ns = await git(cwd, ['diff', '--numstat', '--diff-filter=d', this.listRef]);
         parseNumstat(ns).forEach((v, k) => stat.set(k, v));
         // Files with real (non-whitespace) changes — anything else is formatting-only.
-        for (const r of (await git(cwd, ['diff', '--name-only', '-w', '--diff-filter=d', this.baseRef])).split('\n')) {
+        for (const r of (await git(cwd, ['diff', '--name-only', '-w', '--diff-filter=d', this.listRef])).split('\n')) {
           const rel = r.trim();
           if (rel) realChanged.add(rel);
         }
@@ -1249,6 +1283,15 @@ class DiffTree {
     this.status = status;
     this.stat = stat;
     this.realChanged = realChanged;
+    // Drop group assignments for files no longer changed (committed/reverted). Skip in commit mode,
+    // where `files` is only the uncommitted subset — pruning then would wrongly forget branch files.
+    if (cwd && this.base && diffMode(this.context) !== 'commit') {
+      const groups = getGroups(this.context, this.base);
+      const fileSet = new Set(files);
+      let changed = false;
+      for (const r of Object.keys(groups)) if (!fileSet.has(r)) (delete groups[r], (changed = true));
+      if (changed) await setGroups(this.context, this.base, groups);
+    }
     this.refresh();
     this.updateProgress();
     postSearchCounts();
@@ -1256,23 +1299,25 @@ class DiffTree {
     todoTree?.load();
   }
 
-  /** Show "N/total viewed" next to the section title. */
+  /** Show "N/total viewed · <mode>" by the title + a comment-count badge on the view. */
   updateProgress() {
     if (!diffTreeView) return;
+    vscode.commands.executeCommand('setContext', 'vetty.hasBase', !!this.base); // drives viewsWelcome
     const cwd = getCwd();
+    const mode = DIFF_MODE_SHORT[diffMode(this.context)];
     if (!cwd || !this.base) {
-      diffTreeView.description = '';
+      diffTreeView.description = mode;
+      diffTreeView.badge = undefined;
       return;
     }
     const viewed = getViewed(this.context, this.base);
     const ignored = getIgnored(this.context, this.base);
     const active = this.files.filter((f) => !ignored.has(f));
     const vw = active.filter((f) => isViewed(cwd, viewed, f)).length;
-    diffTreeView.description = !active.length
-      ? ''
-      : vw === active.length
-        ? `✓ all ${active.length} reviewed`
-        : `${vw}/${active.length} viewed`;
+    const progress = !active.length ? '' : vw === active.length ? `✓ all ${active.length} reviewed` : `${vw}/${active.length} viewed`;
+    diffTreeView.description = [progress, mode].filter(Boolean).join('  ·  ');
+    const cc = commentCount(this.context);
+    diffTreeView.badge = cc ? { value: cc, tooltip: `${cc} review comment(s)` } : undefined;
   }
 
   getTreeItem(el) {
@@ -1316,14 +1361,10 @@ class DiffTree {
       });
     }
 
-    if (!this.base) {
-      const it = new vscode.TreeItem('Select a branch to diff against…');
-      it.iconPath = new vscode.ThemeIcon('git-branch');
-      it.command = { command: 'vetty.treePickBranch', title: 'Change Branch' };
-      return [it];
-    }
+    if (!this.base) return []; // viewsWelcome shows the "pick a branch" message
 
     if (!el) {
+      if (!this.files.length) return []; // viewsWelcome shows the "no changes" message
       const viewed = getViewed(this.context, this.base);
       const ignored = getIgnored(this.context, this.base);
       const shown = this.files.filter((f) => this._matches(cwd, viewed, f));
@@ -1442,8 +1483,8 @@ class TodoTree {
   }
   async load() {
     const cwd = getCwd();
-    const base = lastBranch(this.context);
-    this.items = cwd && base ? await findTodos(cwd, base) : [];
+    const ref = diffTree?.listRef; // honor the active diff mode (branch merge-base vs HEAD)
+    this.items = cwd && ref ? await findTodos(cwd, ref) : [];
     this.refresh();
   }
   getTreeItem(el) {
@@ -1524,6 +1565,7 @@ async function treeOpenFile(item, sel) {
 // Diff left-side mode: 'branch' (whole branch vs merge-base), 'review' (since last viewed), 'commit' (since last commit / HEAD).
 const DIFF_MODES = ['branch', 'review', 'commit'];
 const DIFF_MODE_LABEL = { branch: 'Whole branch', review: 'Since last review', commit: 'Since last commit' };
+const DIFF_MODE_SHORT = { branch: 'whole branch', review: 'since review', commit: 'since commit' };
 function diffMode(context) {
   const m = context.workspaceState.get('vetty.diffMode');
   return DIFF_MODES.includes(m) ? m : 'review'; // default: since last review
@@ -1590,11 +1632,11 @@ async function openNextUnviewed(context, base, cwd, justViewed) {
 }
 
 /** Open a changed file the right way: whole file for new files, else its diff. */
-async function openReviewFile(context, cwd, base, rel) {
+async function openReviewFile(context, cwd, base, rel, opts = { preview: true }) {
   if (diffTree.added.has(rel) && !hasSinceReviewDiff(context, cwd, base, rel)) {
-    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), { preview: true });
+    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), opts);
   } else {
-    await openOneDiff(context, cwd, base, rel, { preview: true });
+    await openOneDiff(context, cwd, base, rel, opts);
   }
 }
 
@@ -1681,43 +1723,88 @@ async function removeFromGroup(context, item, sel) {
   refreshTree();
 }
 
-/** Stage every file in a chosen group (then commit it in Source Control). */
+/** Group names to act on: the checked groups in the dropdown, else prompt for one. null = cancel/none. */
+async function targetGroupNames(context, placeHolder) {
+  const base = diffTree?.base;
+  const names = groupNames(getGroups(context, base));
+  if (!names.length) {
+    vscode.window.showInformationMessage('No groups yet — right-click files → Add to Group.');
+    return null;
+  }
+  if (diffTree.groupFilter && diffTree.groupFilter.length) return diffTree.groupFilter; // act on checked groups
+  const one = await vscode.window.showQuickPick(names, { placeHolder });
+  return one ? [one] : null;
+}
+const filesInGroups = (map, names) => Object.keys(map).filter((r) => names.includes(map[r]));
+const groupsTitle = (names) => (names.length === 1 ? `"${names[0]}"` : `${names.length} groups`);
+
+/** Stage every file in the target group(s) (then commit it in Source Control). */
 async function stageGroup(context) {
   const cwd = getCwd();
   const base = diffTree?.base;
   if (!cwd || !base) return;
-  const groups = getGroups(context, base);
-  const names = groupNames(groups);
-  if (!names.length) {
-    vscode.window.showInformationMessage('No groups yet — right-click files → Add to Group.');
-    return;
+  const names = await targetGroupNames(context, 'Stage which group?');
+  if (!names) return;
+  const files = filesInGroups(getGroups(context, base), names);
+  if (!files.length) return;
+  const viewed = getViewed(context, base);
+  const unviewed = files.filter((f) => !isViewed(cwd, viewed, f)).length;
+  if (unviewed) {
+    const ok = await vscode.window.showWarningMessage(
+      `Stage ${groupsTitle(names)}? ${unviewed} of ${files.length} file(s) are still unviewed.`,
+      { modal: true },
+      'Stage anyway'
+    );
+    if (ok !== 'Stage anyway') return;
   }
-  const name = await vscode.window.showQuickPick(names, { placeHolder: 'Stage which group?' });
-  if (!name) return;
-  const files = Object.keys(groups).filter((r) => groups[r] === name);
   try {
     await git(cwd, ['add', '--', ...files]);
   } catch (e) {
     vscode.window.showErrorMessage(`git add failed: ${e.message}`);
     return;
   }
-  vscode.window.setStatusBarMessage(`Staged group "${name}" (${files.length} file(s)). Commit in Source Control.`, 3000);
+  vscode.window.setStatusBarMessage(`Staged ${groupsTitle(names)} (${files.length} file(s)). Commit in Source Control.`, 3000);
 }
 
-/** Ungroup a whole group — remove every file from it (files untouched); the group disappears. */
+/** Mark every file in the target group(s) viewed. */
+async function markGroupViewed(context) {
+  const cwd = getCwd();
+  const base = diffTree?.base;
+  if (!cwd || !base) return;
+  const names = await targetGroupNames(context, 'Mark which group viewed?');
+  if (!names) return;
+  const viewed = getViewed(context, base);
+  for (const r of filesInGroups(getGroups(context, base), names)) viewed[r] = await viewedEntry(cwd, r);
+  await setViewed(context, base, viewed);
+  updateViewedContext(context);
+  refreshTree();
+}
+
+/** Open every file in the target group(s) (honors the active diff mode). */
+async function openGroup(context) {
+  const cwd = getCwd();
+  const base = diffTree?.base;
+  if (!cwd || !base) return;
+  const names = await targetGroupNames(context, 'Open which group?');
+  if (!names) return;
+  const files = filesInGroups(getGroups(context, base), names);
+  if (!files.length) return;
+  if (files.length > MAX_OPEN_WITHOUT_CONFIRM) {
+    const ok = await vscode.window.showWarningMessage(`Open ${files.length} editors?`, { modal: true }, 'Open');
+    if (ok !== 'Open') return;
+  }
+  for (const f of files) await openReviewFile(context, cwd, base, f, { preview: false, preserveFocus: true });
+}
+
+/** Ungroup the target group(s) — remove their files (files untouched); the group(s) disappear. */
 async function ungroup(context) {
   const base = diffTree?.base;
   if (!base) return;
+  const names = await targetGroupNames(context, 'Ungroup which group?');
+  if (!names) return;
   const groups = getGroups(context, base);
-  const names = groupNames(groups);
-  if (!names.length) {
-    vscode.window.showInformationMessage('No groups.');
-    return;
-  }
-  const name = await vscode.window.showQuickPick(names, { placeHolder: 'Ungroup which group?' });
-  if (!name) return;
-  for (const r of Object.keys(groups)) if (groups[r] === name) delete groups[r];
-  if (diffTree.groupFilter) diffTree.groupFilter = diffTree.groupFilter.filter((n) => n !== name);
+  for (const r of Object.keys(groups)) if (names.includes(groups[r])) delete groups[r];
+  if (diffTree.groupFilter) diffTree.groupFilter = diffTree.groupFilter.filter((n) => !names.includes(n));
   await setGroups(context, base, groups);
   refreshTree();
 }
@@ -1931,15 +2018,19 @@ async function pickDiffMode(context) {
   const pick = await vscode.window.showQuickPick(
     DIFF_MODES.map((m) => ({
       label: (m === cur ? '$(check) ' : '') + DIFF_MODE_LABEL[m],
-      detail: { branch: 'Diff against the base branch (merge-base)', review: 'Diff against the version you last reviewed', commit: 'Diff against HEAD (uncommitted changes only)' }[m],
+      detail: {
+        branch: 'Every file changed on the branch — like a PR\'s "Files changed"',
+        review: 'Every branch file, each showing changes since you last viewed it — like GitHub\'s "viewed" files',
+        commit: 'Only uncommitted changes vs HEAD — like Source Control',
+      }[m],
       mode: m,
     })),
-    { placeHolder: 'Diff mode for opening files' }
+    { placeHolder: 'Diff mode — what each file is compared against' }
   );
   if (!pick) return;
   await context.workspaceState.update('vetty.diffMode', pick.mode);
   await vscode.commands.executeCommand('setContext', 'vetty.diffMode', pick.mode);
-  refreshTree(); // added-file open-vs-diff routing depends on the mode
+  await diffTree.load(); // the listed file set differs (branch changes vs uncommitted-vs-HEAD)
   vscode.window.setStatusBarMessage(`Diff mode: ${DIFF_MODE_LABEL[pick.mode]}`, 2500);
 }
 

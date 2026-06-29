@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.14",
+  "version": "0.0.23",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -213,6 +213,22 @@
         "icon": "$(layers)"
       },
       {
+        "command": "vetty.openGroup",
+        "title": "Open Group",
+        "category": "Vetty"
+      },
+      {
+        "command": "vetty.markGroupViewed",
+        "title": "Mark Group Viewed",
+        "category": "Vetty"
+      },
+      {
+        "command": "vetty.collapseAll",
+        "title": "Collapse All",
+        "category": "Vetty",
+        "icon": "$(collapse-all)"
+      },
+      {
         "command": "vetty.ungroup",
         "title": "Ungroup…",
         "category": "Vetty",
@@ -314,6 +330,18 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "vettyView",
+        "when": "!vetty.hasBase",
+        "contents": "Review the files your branch changed.\n\nVetty diffs against the inferred parent branch and tracks what you've reviewed.\n[Pick a base branch](command:vetty.treePickBranch)\n\nReviewing a teammate's PR? Enable PR mode in settings, then [Review a Pull Request](command:vetty.reviewPr)."
+      },
+      {
+        "view": "vettyView",
+        "when": "vetty.hasBase",
+        "contents": "No changes vs the base branch.\n\nMake some edits, or [change the base branch](command:vetty.treePickBranch).\nSwitch what each file compares against with [Diff Mode](command:vetty.pickDiffMode)."
+      }
+    ],
     "menus": {
       "editor/title": [
         {
@@ -359,17 +387,17 @@
           "group": "navigation@4"
         },
         {
-          "command": "vetty.stageGroup",
-          "when": "view == vettyView",
-          "group": "1_more@1b"
+          "command": "vetty.collapseAll",
+          "when": "view == vettyView && vetty.nested",
+          "group": "navigation@5"
         },
         {
-          "command": "vetty.ungroup",
+          "command": "vetty.exportComments",
           "when": "view == vettyView",
-          "group": "1_more@1c"
+          "group": "1_more@1"
         },
         {
-          "command": "vetty.fetch",
+          "command": "vetty.clearComments",
           "when": "view == vettyView",
           "group": "1_more@2"
         },
@@ -384,23 +412,18 @@
           "group": "1_more@3"
         },
         {
-          "command": "vetty.hideWhitespace",
-          "when": "view == vettyView && !vetty.hideWhitespace",
-          "group": "1_more@3b"
-        },
-        {
-          "command": "vetty.showWhitespace",
-          "when": "view == vettyView && vetty.hideWhitespace",
-          "group": "1_more@3b"
-        },
-        {
-          "command": "vetty.exportComments",
+          "command": "vetty.fetch",
           "when": "view == vettyView",
           "group": "1_more@4"
         },
         {
-          "command": "vetty.clearComments",
-          "when": "view == vettyView",
+          "command": "vetty.hideWhitespace",
+          "when": "view == vettyView && !vetty.hideWhitespace",
+          "group": "1_more@5"
+        },
+        {
+          "command": "vetty.showWhitespace",
+          "when": "view == vettyView && vetty.hideWhitespace",
           "group": "1_more@5"
         }
       ],
