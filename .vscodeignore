@@ -8,3 +8,4 @@ test/**
 dist/**
 .github/**
 *.vsix
+release.bat
