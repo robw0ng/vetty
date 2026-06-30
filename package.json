@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.23",
+  "version": "0.0.31",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -170,7 +170,7 @@
       },
       {
         "command": "vetty.finishReview",
-        "title": "Finish Review (delete PR branch)",
+        "title": "Finish Review",
         "category": "Vetty",
         "icon": "$(sign-out)"
       },
@@ -276,6 +276,12 @@
         "command": "vetty.treeMarkAllUnviewed",
         "title": "Unview All",
         "icon": "$(eye)"
+      },
+      {
+        "command": "vetty.pullPrComments",
+        "title": "Pull PR Comments",
+        "category": "Vetty",
+        "icon": "$(comment-discussion)"
       },
       {
         "command": "vetty.exportComments",
@@ -397,34 +403,39 @@
           "group": "1_more@1"
         },
         {
+          "command": "vetty.pullPrComments",
+          "when": "view == vettyView && vetty.prMode",
+          "group": "1_more@2"
+        },
+        {
           "command": "vetty.clearComments",
           "when": "view == vettyView",
-          "group": "1_more@2"
+          "group": "1_more@3"
         },
         {
           "command": "vetty.viewAsTree",
           "when": "view == vettyView && !vetty.nested",
-          "group": "1_more@3"
+          "group": "1_more@4"
         },
         {
           "command": "vetty.viewAsList",
           "when": "view == vettyView && vetty.nested",
-          "group": "1_more@3"
+          "group": "1_more@4"
         },
         {
           "command": "vetty.fetch",
           "when": "view == vettyView",
-          "group": "1_more@4"
+          "group": "1_more@5"
         },
         {
           "command": "vetty.hideWhitespace",
           "when": "view == vettyView && !vetty.hideWhitespace",
-          "group": "1_more@5"
+          "group": "1_more@6"
         },
         {
           "command": "vetty.showWhitespace",
           "when": "view == vettyView && vetty.hideWhitespace",
-          "group": "1_more@5"
+          "group": "1_more@6"
         }
       ],
       "view/item/context": [
