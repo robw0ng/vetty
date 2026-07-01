@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.0.51
+
+- Docs: READMEs updated for the JetBrains port and current feature set; spec MDs removed.
+
+## 0.0.50
+
+- **JetBrains/Rider port** (`jetbrains/`, v0.1.0): native tool window with the Review / TODOs /
+  Comments sections, viewed tracking (unsaved-edit aware), parent-branch inference with an
+  ancestry-labeled picker, both diff toggles, since-last-review diffs, inline gutter comments with
+  export, TODO scanner, Search section (name filter, scope dropdown, content search with
+  case/word/regex toggles and match highlighting), hide-whitespace toggle, auto-refresh.
+  Released as `vetty-rider-<version>.zip` alongside the VSIX.
+- **Fixes (VS Code)**: repo-root resolution (workspace folder can be a subdir of the repo),
+  non-ASCII paths (`core.quotePath=false`), renamed files diff against their old name instead of
+  showing fully added, comment anchors no longer wiped when persisting with the file's tab closed,
+  mark-viewed works from the left side of a since-review diff, "All unviewed" + individually
+  checked files opens the union.
+- **Performance**: file hashes cached by mtime/size, workspaceState reads memoized, bulk
+  mark-viewed snapshots in one `git hash-object --stdin-paths` process, `git add` chunked,
+  whitespace diff only computed while the toggle is on, TODO scan and search skip huge/binary files.
+- **Multi-root**: `Vetty: Pick Workspace Folder` chooses which folder to review.
+- **GC**: stale per-base state (viewed / ignored / groups / base memory) for deleted branches is
+  pruned once per session.
+- **Internals**: `extension.js` split into `src/` modules (core / tree / search / comments /
+  commands); CI builds and attaches the Rider plugin zip to releases.
+
 ## 0.0.1
 
 Initial release. Local code review for VS Code (and Cursor) — vet code you didn't write.
