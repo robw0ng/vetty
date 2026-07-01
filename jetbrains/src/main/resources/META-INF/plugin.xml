@@ -1,0 +1,32 @@
+<idea-plugin>
+    <id>dev.vetty</id>
+    <name>Vetty</name>
+    <vendor url="https://github.com/robw0ng/vetty">robw0ng</vendor>
+
+    <description><![CDATA[
+        <b>Vet code you didn't write.</b> Local code review for JetBrains IDEs.
+        Pick a base branch and Vetty lists every changed file, tracks which ones you've
+        reviewed, shows only what's new since your last pass, and lets you leave inline
+        comments you can export back to an AI agent. No PR required.
+    ]]></description>
+
+    <!-- Platform-only: loads in Rider and every other JetBrains IDE. -->
+    <depends>com.intellij.modules.platform</depends>
+    <depends>Git4Idea</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="Vetty" anchor="right" icon="AllIcons.Actions.Preview"
+                    factoryClass="dev.vetty.VettyToolWindowFactory"/>
+        <postStartupActivity implementation="dev.vetty.VettyStartup"/>
+    </extensions>
+
+    <actions>
+        <action id="Vetty.AddComment" class="dev.vetty.VettyAddCommentAction"
+                text="Vetty: Add Comment" description="Add a Vetty review comment on this line / selection">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="Diff.EditorPopupMenu" anchor="last"/>
+            <add-to-group group-id="Diff.ViewerPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default" first-keystroke="alt shift C"/>
+        </action>
+    </actions>
+</idea-plugin>

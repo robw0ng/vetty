@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.31",
+  "version": "0.0.50",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -100,6 +100,12 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "vetty.pickFolder",
+        "title": "Pick Workspace Folder",
+        "category": "Vetty",
+        "icon": "$(root-folder)"
+      },
+      {
         "command": "vetty.treeOpenUnviewed",
         "title": "Open All Unviewed",
         "icon": "$(eye)"
@@ -157,10 +163,28 @@
         "icon": "$(whitespace)"
       },
       {
-        "command": "vetty.pickDiffMode",
-        "title": "Diff Mode (branch / since review / since commit)",
+        "command": "vetty.diffSinceCommit",
+        "title": "Range: Whole Branch (click for Uncommitted)",
         "category": "Vetty",
         "icon": "$(git-compare)"
+      },
+      {
+        "command": "vetty.diffWholeBranch",
+        "title": "Range: Uncommitted (click for Whole Branch)",
+        "category": "Vetty",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "vetty.sinceReviewOn",
+        "title": "Compare: Base (click for Last Viewed)",
+        "category": "Vetty",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "vetty.sinceReviewOff",
+        "title": "Compare: Last Viewed (click for Base)",
+        "category": "Vetty",
+        "icon": "$(eye)"
       },
       {
         "command": "vetty.reviewPr",
@@ -229,6 +253,12 @@
         "icon": "$(collapse-all)"
       },
       {
+        "command": "vetty.expandAll",
+        "title": "Expand All",
+        "category": "Vetty",
+        "icon": "$(expand-all)"
+      },
+      {
         "command": "vetty.ungroup",
         "title": "Ungroup…",
         "category": "Vetty",
@@ -242,6 +272,10 @@
       {
         "command": "vetty.copyPaths",
         "title": "Copy Path(s)"
+      },
+      {
+        "command": "vetty.copyTodos",
+        "title": "Copy TODO(s)"
       },
       {
         "command": "vetty.showMore",
@@ -308,6 +342,19 @@
         "command": "vetty.copyComment",
         "title": "Copy Comment",
         "icon": "$(copy)"
+      },
+      {
+        "command": "vetty.editComment",
+        "title": "Edit Comment",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "vetty.saveComment",
+        "title": "Save"
+      },
+      {
+        "command": "vetty.cancelEditComment",
+        "title": "Cancel"
       }
     ],
     "viewsContainers": {
@@ -345,7 +392,7 @@
       {
         "view": "vettyView",
         "when": "vetty.hasBase",
-        "contents": "No changes vs the base branch.\n\nMake some edits, or [change the base branch](command:vetty.treePickBranch).\nSwitch what each file compares against with [Diff Mode](command:vetty.pickDiffMode)."
+        "contents": "No changes vs the base branch.\n\nMake some edits, or [change the base branch](command:vetty.treePickBranch)."
       }
     ],
     "menus": {
@@ -388,54 +435,79 @@
           "group": "navigation@3"
         },
         {
-          "command": "vetty.pickDiffMode",
-          "when": "view == vettyView",
+          "command": "vetty.diffSinceCommit",
+          "when": "view == vettyView && vetty.diffRange != commit",
           "group": "navigation@4"
         },
         {
-          "command": "vetty.collapseAll",
-          "when": "view == vettyView && vetty.nested",
+          "command": "vetty.diffWholeBranch",
+          "when": "view == vettyView && vetty.diffRange == commit",
+          "group": "navigation@4"
+        },
+        {
+          "command": "vetty.sinceReviewOn",
+          "when": "view == vettyView && !vetty.sinceReview",
           "group": "navigation@5"
         },
         {
-          "command": "vetty.exportComments",
-          "when": "view == vettyView",
-          "group": "1_more@1"
-        },
-        {
-          "command": "vetty.pullPrComments",
-          "when": "view == vettyView && vetty.prMode",
-          "group": "1_more@2"
-        },
-        {
-          "command": "vetty.clearComments",
-          "when": "view == vettyView",
-          "group": "1_more@3"
+          "command": "vetty.sinceReviewOff",
+          "when": "view == vettyView && vetty.sinceReview",
+          "group": "navigation@5"
         },
         {
           "command": "vetty.viewAsTree",
           "when": "view == vettyView && !vetty.nested",
-          "group": "1_more@4"
+          "group": "2_view@1"
         },
         {
           "command": "vetty.viewAsList",
           "when": "view == vettyView && vetty.nested",
-          "group": "1_more@4"
+          "group": "2_view@1"
         },
         {
-          "command": "vetty.fetch",
-          "when": "view == vettyView",
-          "group": "1_more@5"
+          "command": "vetty.expandAll",
+          "when": "view == vettyView && vetty.nested",
+          "group": "2_view@2"
+        },
+        {
+          "command": "vetty.collapseAll",
+          "when": "view == vettyView && vetty.nested",
+          "group": "2_view@3"
         },
         {
           "command": "vetty.hideWhitespace",
           "when": "view == vettyView && !vetty.hideWhitespace",
-          "group": "1_more@6"
+          "group": "2_view@4"
         },
         {
           "command": "vetty.showWhitespace",
           "when": "view == vettyView && vetty.hideWhitespace",
-          "group": "1_more@6"
+          "group": "2_view@4"
+        },
+        {
+          "command": "vetty.fetch",
+          "when": "view == vettyView",
+          "group": "3_git@1"
+        },
+        {
+          "command": "vetty.pickFolder",
+          "when": "view == vettyView && workspaceFolderCount > 1",
+          "group": "3_git@2"
+        },
+        {
+          "command": "vetty.exportComments",
+          "when": "view == vettyView",
+          "group": "1_comments@1"
+        },
+        {
+          "command": "vetty.pullPrComments",
+          "when": "view == vettyView && vetty.prMode",
+          "group": "1_comments@2"
+        },
+        {
+          "command": "vetty.clearComments",
+          "when": "view == vettyView",
+          "group": "1_comments@3"
         }
       ],
       "view/item/context": [
@@ -507,12 +579,12 @@
         {
           "command": "vetty.treeView",
           "when": "view == vettyView && viewItem == file-unviewed",
-          "group": "navigation@3"
+          "group": "navigation@0"
         },
         {
           "command": "vetty.treeUnview",
           "when": "view == vettyView && viewItem == file-viewed",
-          "group": "navigation@3"
+          "group": "navigation@0"
         },
         {
           "command": "vetty.treeIgnore",
@@ -551,9 +623,26 @@
       ],
       "comments/comment/title": [
         {
+          "command": "vetty.editComment",
+          "group": "inline@1",
+          "when": "commentController == vetty.comments && comment == editable"
+        },
+        {
           "command": "vetty.copyComment",
-          "group": "inline",
+          "group": "inline@2",
           "when": "commentController == vetty.comments"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "vetty.saveComment",
+          "group": "inline@1",
+          "when": "commentController == vetty.comments && comment == editable"
+        },
+        {
+          "command": "vetty.cancelEditComment",
+          "group": "inline@2",
+          "when": "commentController == vetty.comments && comment == editable"
         }
       ],
       "commandPalette": [
@@ -638,7 +727,23 @@
           "when": "false"
         },
         {
+          "command": "vetty.editComment",
+          "when": "false"
+        },
+        {
+          "command": "vetty.saveComment",
+          "when": "false"
+        },
+        {
+          "command": "vetty.cancelEditComment",
+          "when": "false"
+        },
+        {
           "command": "vetty.copyPaths",
+          "when": "false"
+        },
+        {
+          "command": "vetty.copyTodos",
           "when": "false"
         },
         {
@@ -685,6 +790,12 @@
         "key": "ctrl+c",
         "mac": "cmd+c",
         "when": "focusedView == vettyView"
+      },
+      {
+        "command": "vetty.copyTodos",
+        "key": "ctrl+c",
+        "mac": "cmd+c",
+        "when": "focusedView == vettyTodos"
       },
       {
         "command": "vetty.nextUnviewed",
