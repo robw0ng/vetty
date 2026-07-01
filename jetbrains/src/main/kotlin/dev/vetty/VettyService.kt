@@ -115,7 +115,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     }
 
     /**
-     * Per-branch base resolution (see docs/BASE_RESOLUTION_SPEC.md). Runs on every load so a branch switch
+     * Per-branch base resolution. Runs on every load so a branch switch
      * restores that branch's base; an unset branch infers its closest ancestor. Never clobbers a manual pick.
      */
     private val validatedBase = HashSet<String>()  // "cur base" pairs already vetted this session
@@ -218,7 +218,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     fun welcomed(): Boolean = state.welcomed
     fun setWelcomed() { state.welcomed = true }
 
-    // --- diff controls: two independent toggles (see docs/DIFF_MODE_SPEC.md) ----------------------
+    // --- diff controls: two independent toggles ----------------------
 
     /** Range: "branch" (vs merge-base) or "commit" (uncommitted, vs HEAD). */
     fun range(): String = if (state.diffRange == "commit") "commit" else "branch"

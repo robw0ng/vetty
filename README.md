@@ -19,7 +19,8 @@ what changed since your last pass.
 | **Since-last-review diff**                                 | Unviewed files diff against the version you last reviewed                                                   | See only what's*new*, not the whole file again |
 | **Inline comments**                                        | PR-style notes that persist and re-anchor by content when a file is rewritten                               | Notes survive AI edits instead of drifting     |
 | **In-panel text search**                                   | Search the shown files (case/word/regex); matches fold into the tree, click to jump                         | Find code without leaving the review           |
-| **Scope chips**                                            | Narrow to All / Unviewed / Added / Modified                                                                 | One click to "just what I haven't reviewed"    |
+| **Scope filter**                                           | Dropdown to narrow to All / Unviewed / Added / Modified                                                     | One click to "just what I haven't reviewed"    |
+| **Multi-root**                                             | `Vetty: Pick Workspace Folder` chooses which folder (repo) to review                                        | Works in multi-folder workspaces               |
 | **Hide whitespace-only**                                   | Drop files whose only change is formatting                                                                  | Real changes stop hiding in reformat noise     |
 | **Track / Untrack**                                        | Push noise files (lockfiles, generated) into their own section                                              | Focus only on what matters                     |
 | **TODO scanner**                                           | Lists new TODO/FIXME/etc added in the branch                                                                | Catch leftover markers before they ship        |
@@ -93,7 +94,8 @@ PR review is **experimental and off by default**. Turn on `vetty.pullRequests.en
 
 ## Notes
 
-- Works in VS Code and any VS Code fork (Cursor, Windsurf, VSCodium). Not JetBrains/Rider.
+- Works in VS Code and any VS Code fork (Cursor, Windsurf, VSCodium). For JetBrains IDEs (Rider,
+  IntelliJ, …) there's a native port — see [`jetbrains/`](jetbrains/README.md).
 - Comments and viewed-state are local to your machine and stored per workspace.
 - PR review needs the GitHub CLI (`gh`); without it (or with `vetty.pullRequests.enabled: false`)
   Vetty runs fully local with no change to the rest of its features.

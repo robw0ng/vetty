@@ -9,18 +9,22 @@ Works in Rider and every other JetBrains IDE (depends only on the platform, not 
 
 ## Features (v0.1)
 
-- **Changed-files tool window** (right dock) — `git diff` vs the base branch + untracked files, with `+/-` counts.
-- **Auto base branch** — defaults to `main`/`master`/`develop`; change via the branch button.
-- **Viewed tracking** — mark a file viewed (snapshots a git blob); edit it and it re-flags unviewed automatically.
-- **Two diff toggles** (see `../docs/DIFF_MODE_SPEC.md`): **Range** — whole branch (merge-base) ⇄ uncommitted (vs HEAD); **Compare** (last viewed / base) — unviewed files diff against their last-viewed snapshot instead of the range base.
+- **Changed-files tool window** (right dock) — `git diff` vs the base branch + untracked files, with `+/-` counts, in collapsible Search / Review / TODOs / Comments sections.
+- **Auto base branch** — infers the branch's direct parent (closest ancestor); the picker labels every branch parent / ancestor / descendant / diverged.
+- **Viewed tracking** — mark a file viewed (snapshots a git blob); edit it and it re-flags unviewed automatically (unsaved edits count). Auto-advance opens the next unviewed file.
+- **Search section** — filter files by name, scope dropdown (All / Unviewed / Added / Modified), and a content search over the shown files with case / whole-word / regex toggles. Matches fold into the tree as child rows (per-file match counts); clicking one opens the file with the match selected. Header shows `⚠ filtered: X of Y` whenever anything is hidden.
+- **Hide whitespace-only changes** — toolbar toggle drops files whose only change is formatting.
+- **Two diff toggles**: **Range** — whole branch (merge-base) ⇄ uncommitted (vs HEAD); **Compare** (last viewed / base) — unviewed files diff against their last-viewed snapshot instead of the range base.
 - **Inline comments** — `Alt+Shift+C` (or right-click → Vetty: Add Comment) adds a gutter comment on the line/selection; click the gutter icon to edit/delete. Comments re-anchor by content when a file is rewritten. **Export Comments** copies all as `file:line — note`.
 - **TODO scanner** — new TODO/FIXME/etc. introduced vs the base, in their own pane.
 - **Track / Untrack** — push noise files (lockfiles, generated) into the Untracked section.
 - **Auto-refresh** — the tree reloads on any file change, including out-of-editor agent edits; typing re-flags a viewed file unviewed instantly.
 
-Keys in the tool window: `j`/`k` next/prev unviewed (opens diff), `v` toggle viewed, double-click opens a pinned diff.
+Keys in the tool window: `j`/`k` next/prev unviewed (opens diff), `v` toggle viewed, double-click opens a
+pinned diff. Right-click a section header for bulk actions (View all / Unview all / Track all / Open all).
+New (added/untracked) files open as files, not empty diffs.
 
-Not ported: PR review (`gh`), in-panel text search, scope chips, hide-whitespace-only changes.
+Not ported (deliberately): PR review (`gh`) and file groups.
 
 ## Build & run
 
@@ -52,7 +56,7 @@ still loads in Rider).
 ```bash
 ./gradlew compileTestKotlin
 java -cp "build/classes/kotlin/main;build/classes/kotlin/test;<junit>;<hamcrest>;<kotlin-stdlib>;<rider-lib>/*" \
-     org.junit.runner.JUnitCore dev.vetty.VettyParseTest   # → OK (5 tests)
+     org.junit.runner.JUnitCore dev.vetty.VettyParseTest   # → OK (4 tests)
 ```
 
 ## How it maps to the VS Code version
