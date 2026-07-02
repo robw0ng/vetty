@@ -1,7 +1,8 @@
-// Smoke test for the pure helpers in lib.js. Run: node test/smoke.js
+// Smoke test for the pure helpers in lib.js + the viewed-state EOL behavior in src/core.js.
+// Run: node test/smoke.js
 'use strict';
 const assert = require('assert');
-const { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks } = require('../lib');
+const { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks, eolNormalize } = require('../lib');
 
 // lineRef: single line, multi-line, and the column-0 end (exclusive last line).
 assert.strictEqual(lineRef(11, 11, 5), '12', 'single line');
@@ -46,5 +47,65 @@ assert.deepStrictEqual(todos, [
   { rel: 'foo.js', line: 11, text: '// TODO: fix this' },
   { rel: 'foo.js', line: 22, text: '// FIXME later' },
 ], 'TODO at +11, FIXME at +22 (deletion does not advance the new-file counter)');
+
+// eolNormalize: CRLF / lone CR → LF, everything else byte-preserved.
+assert.deepStrictEqual(eolNormalize(Buffer.from('a\r\nb\r\n')), Buffer.from('a\nb\n'), 'CRLF → LF');
+assert.deepStrictEqual(eolNormalize(Buffer.from('a\rb')), Buffer.from('a\nb'), 'lone CR → LF');
+assert.deepStrictEqual(eolNormalize(Buffer.from('a\nb\n')), Buffer.from('a\nb\n'), 'LF untouched');
+assert.deepStrictEqual(eolNormalize(Buffer.from('a\r\r\nb')), Buffer.from('a\n\nb'), 'CR then CRLF');
+assert.deepStrictEqual(
+  eolNormalize(Buffer.from([0xff, 0x00, 0x0d, 0x0a, 0xf0, 0x9f, 0x8e, 0x89])),
+  Buffer.from([0xff, 0x00, 0x0a, 0xf0, 0x9f, 0x8e, 0x89]),
+  'non-EOL bytes (binary / UTF-8) byte-preserved'
+);
+assert.ok(
+  eolNormalize(Buffer.from('x\r\ny')).equals(eolNormalize(Buffer.from('x\ny'))),
+  'CRLF and LF variants normalize identically'
+);
+
+// Integration: the branch swap-and-back scenario against the real fileHash/isViewed (vscode stubbed).
+// A file marked viewed as LF must STAY viewed after git rewrites it as CRLF (autocrlf), and vice versa.
+{
+  const Module = require('module');
+  const origLoad = Module._load;
+  Module._load = (r, p, m) => (r === 'vscode'
+    ? { EventEmitter: class { get event() { return () => {}; } fire() {} }, workspace: {}, window: {}, commands: {}, Uri: {}, RelativePattern: class {} }
+    : origLoad(r, p, m));
+  const core = require('../src/core.js');
+  Module._load = origLoad;
+
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vetty-eol-'));
+  const rel = 'a.js';
+  const p = path.join(dir, rel);
+  const write = (text, mtime) => {
+    fs.writeFileSync(p, text);
+    fs.utimesSync(p, mtime, mtime); // distinct mtimes so the hash cache can't mask a real change
+  };
+
+  // Mark viewed while the file is LF (how AI tools write it)…
+  write('const x = 1;\nconst y = 2;\n', new Date(2026, 0, 1));
+  const viewed = { [rel]: { h: core.fileHash(dir, rel), b: null } };
+  assert.ok(core.isViewed(dir, viewed, rel), 'viewed right after marking');
+
+  // …swap branches and back: git rewrites the file with CRLF (autocrlf). Same content, new EOLs+mtime.
+  write('const x = 1;\r\nconst y = 2;\r\n', new Date(2026, 0, 2));
+  assert.ok(core.isViewed(dir, viewed, rel), 'STAYS viewed after a CRLF rewrite (the swap-back bug)');
+
+  // A real edit still re-flags it unviewed.
+  write('const x = 999;\r\nconst y = 2;\r\n', new Date(2026, 0, 3));
+  assert.ok(!core.isViewed(dir, viewed, rel), 'real change re-flags unviewed');
+
+  // Migration: an old-format mark (raw-bytes hash, pre-normalization) still counts and self-heals.
+  const crypto = require('crypto');
+  write('old mark era\r\n', new Date(2026, 0, 4));
+  const legacy = { [rel]: { h: crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex'), b: null } };
+  assert.ok(core.isViewed(dir, legacy, rel), 'old-format (raw) mark still viewed');
+  assert.strictEqual(legacy[rel].h, core.fileHash(dir, rel), 'old-format mark self-heals to the new format');
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
 
 console.log('ok — all smoke checks passed');

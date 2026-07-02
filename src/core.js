@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { promisify } = require('util');
-const { parseAheadBehind, parseTodoHunks } = require('../lib');
+const { parseAheadBehind, parseTodoHunks, eolNormalize } = require('../lib');
 
 const execFileAsync = promisify(cp.execFile);
 
@@ -230,19 +230,33 @@ function fileHash(cwd, rel) {
     const key = `${st.mtimeMs}:${st.size}`;
     const c = hashCache.get(rel);
     if (c && c.key === key) return c.h;
-    const h = crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex');
-    hashCache.set(rel, { key, h });
+    // Hash EOL-normalized (CRLF/CR → LF): with autocrlf, a branch swap-and-back rewrites files with
+    // flipped line endings — byte-identical content otherwise — which silently unviewed everything.
+    // (Rider is immune because it hashes the LF-normalized in-memory document.)
+    const buf = fs.readFileSync(p);
+    const h = crypto.createHash('sha1').update(eolNormalize(buf)).digest('hex');
+    const raw = crypto.createHash('sha1').update(buf).digest('hex'); // pre-normalization format, for mark migration
+    hashCache.set(rel, { key, h, raw });
     return h;
   } catch {
     return '';
   }
 }
+/** Raw (old-format) hash of the file — used once to migrate marks made before EOL normalization. */
+function fileHashRaw(cwd, rel) {
+  fileHash(cwd, rel); // populates the cache with both
+  return hashCache.get(rel)?.raw ?? '';
+}
 
-// Viewed marks are per base branch, stored as { relPath: { h: contentHash, b: gitBlobSha } }. A file
-// counts as viewed only while its content still matches `h` (editing it re-flags it unviewed). `b` is
-// the snapshot at mark time, used to diff "changes since last review". Legacy entries are bare hashes.
+// Viewed marks are per CURRENT BRANCH, stored as { relPath: { h: contentHash, b: gitBlobSha } }. A
+// file counts as viewed only while its content still matches `h` (editing it re-flags it unviewed).
+// `b` is the snapshot at mark time, used to diff "changes since last review". Legacy entries are
+// bare hashes. Branch-keyed, NOT base-keyed: base-keyed marks were shared across sibling branches,
+// so marking on one clobbered the other's — and the since-review overlay then diffed against a
+// snapshot taken on the sibling (10271-content showing up while reviewing 10270).
+let activeBranch = null; // current git branch; set by resolveBase before any tree render
 function viewedKey(base) {
-  return `vetty.viewed.${base}`;
+  return `vetty.viewed.${activeBranch || base}`; // base param kept as a pre-first-load fallback
 }
 // Memoize parsed workspaceState values: the getters run per file inside render loops, and the
 // per-call copy (spread / new Set) was the hot spot. Callers share the cached object; every
@@ -269,7 +283,18 @@ function reviewedBlob(map, rel) {
 }
 function isViewed(cwd, map, rel) {
   const h = viewedHash(map[rel]);
-  return !!h && h === fileHash(cwd, rel);
+  if (!h) return false;
+  const cur = fileHash(cwd, rel);
+  if (h === cur) return true;
+  // Migration: marks made before EOL-normalized hashing stored the raw-bytes hash. If that still
+  // matches, the content is unchanged — self-heal the entry to the new format and keep it viewed.
+  if (h === fileHashRaw(cwd, rel)) {
+    const v = map[rel];
+    if (v && typeof v === 'object') v.h = cur;
+    else map[rel] = { h: cur, b: null };
+    return true; // persisted on the next setViewed; stateCache keeps it correct within the session
+  }
+  return false;
 }
 
 /** Snapshot the working file into git's object store and return { h, b } for the viewed map. */
@@ -306,10 +331,10 @@ async function viewedEntries(cwd, rels) {
   return map;
 }
 
-// Ignored marks are a plain per-base list of paths — a deliberate exclusion, so (unlike viewed) it
+// Ignored marks are a plain per-branch list of paths — a deliberate exclusion, so (unlike viewed) it
 // is not tied to content hash. Ignored files get their own tree group, out of Unviewed/Viewed.
 function ignoredKey(base) {
-  return `vetty.ignored.${base}`;
+  return `vetty.ignored.${activeBranch || base}`;
 }
 function getIgnored(context, base) {
   const k = ignoredKey(base);
@@ -324,10 +349,10 @@ function setIgnored(context, base, set) {
   return context.workspaceState.update(ignoredKey(base), [...set]);
 }
 
-// Groups: a per-base { relPath: groupName } map. Lets you bucket changed files (by intent) and stage
+// Groups: a per-branch { relPath: groupName } map. Lets you bucket changed files (by intent) and stage
 // a bucket at a time — a lightweight, working-copy-only changelist. Shown as a [name] tag on the row.
 function groupsKey(base) {
-  return `vetty.groups.${base}`;
+  return `vetty.groups.${activeBranch || base}`;
 }
 function getGroups(context, base) {
   const k = groupsKey(base);
@@ -450,6 +475,7 @@ const validatedBase = new Set(); // `${branch}\0${base}` already vetted this ses
 /** Resolve the base for the current branch: remembered → else closest ancestor. Mirrors to LAST_BRANCH_KEY. */
 async function resolveBase(context, cwd) {
   const cur = await currentBranch(cwd);
+  if (cur) activeBranch = cur; // viewed/ignored/groups are keyed by this
   const map = context.workspaceState.get(BASE_BY_BRANCH) || {};
   let base = cur ? map[cur] : null;
   // Validate a remembered LOCAL base once per session (cheap on later loads via the cache).
@@ -474,15 +500,15 @@ function lastBranch(context) {
   return typeof b === 'string' && b ? b : null;
 }
 
-// GC: per-base state (viewed/ignored/groups + the base-by-branch map) otherwise accumulates
-// forever as branches are deleted. Once per session, drop entries for bases that no longer exist
-// locally (origin/* entries are kept — small, and validating remotes isn't worth a fetch).
+// GC: per-branch state (viewed/ignored/groups + the base-by-branch map) otherwise accumulates
+// forever as branches are deleted. Once per session, drop entries whose branch no longer exists
+// locally. This also gradually clears legacy base-keyed entries (origin/* etc.).
 let prunedStale = false;
 async function pruneStaleState(context, cwd) {
   if (prunedStale) return;
   prunedStale = true;
   const keep = new Set(await localBranches(cwd));
-  const live = (b) => keep.has(b) || b.startsWith('origin/');
+  const live = (b) => keep.has(b);
   for (const key of context.workspaceState.keys()) {
     const m = key.match(/^vetty\.(viewed|ignored|groups)\.(.+)$/);
     if (m && !live(m[2])) {

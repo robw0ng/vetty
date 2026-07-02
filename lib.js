@@ -57,4 +57,20 @@ function parseTodoHunks(out, re) {
   return todos;
 }
 
-module.exports = { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks };
+/** EOL-normalize a Buffer (CRLF / lone CR → LF), byte-lossless otherwise. Content hashes built on
+ *  this survive autocrlf checkout round-trips that flip a file's line endings. */
+function eolNormalize(buf) {
+  const out = Buffer.alloc(buf.length);
+  let n = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0x0d) {
+      out[n++] = 0x0a;
+      if (buf[i + 1] === 0x0a) i++; // CRLF → one LF
+    } else {
+      out[n++] = buf[i];
+    }
+  }
+  return out.subarray(0, n);
+}
+
+module.exports = { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks, eolNormalize };

@@ -49,4 +49,22 @@ class VettyParseTest {
         val c = VettyStateService.Comment().apply { file = "src/a.kt"; line = 4; body = "fix this" }
         assertEquals("src/a.kt:5 — fix this", VettyParse.exportComments(listOf(c)))
     }
+
+    // The branch swap-and-back bug: autocrlf rewrites files with flipped EOLs; a content hash built
+    // on eolNormalize must treat CRLF/LF variants as identical, or every mark dies on checkout.
+    @Test fun eolNormalize_crlfAndLfVariantsAreIdentical() {
+        val lf = "const x = 1;\nconst y = 2;\n".toByteArray()
+        val crlf = "const x = 1;\r\nconst y = 2;\r\n".toByteArray()
+        assertEquals(String(VettyParse.eolNormalize(lf)), String(VettyParse.eolNormalize(crlf)))
+        assertEquals("a\nb\n", String(VettyParse.eolNormalize("a\r\nb\r\n".toByteArray())))   // CRLF → LF
+        assertEquals("a\nb", String(VettyParse.eolNormalize("a\rb".toByteArray())))           // lone CR → LF
+        assertEquals("a\n\nb", String(VettyParse.eolNormalize("a\r\r\nb".toByteArray())))     // CR then CRLF
+        assertEquals("a\nb\n", String(VettyParse.eolNormalize("a\nb\n".toByteArray())))       // LF untouched
+    }
+
+    @Test fun eolNormalize_preservesNonEolBytes() {
+        val bytes = byteArrayOf(-1, 0, 0x0d, 0x0a, -16, -97, -114, -119)   // binary + UTF-8 emoji around a CRLF
+        val expect = byteArrayOf(-1, 0, 0x0a, -16, -97, -114, -119)
+        assertEquals(expect.toList(), VettyParse.eolNormalize(bytes).toList())
+    }
 }

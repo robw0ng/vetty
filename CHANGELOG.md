@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.59
+
+- **Branch-keyed review state.** Viewed/ignored/groups are now keyed by the current branch instead of
+  the base branch. Base-keyed marks were shared across sibling branches: marking a file on one branch
+  clobbered the other's mark, and the since-review overlay could diff against a snapshot taken on the
+  sibling (reviewing branch B showed branch A's content inverted). Marks made before this release
+  reset once. GC prunes by branch existence. Both editors.
+- **EOL-normalized viewed hashing.** With `core.autocrlf`, a branch swap-and-back rewrites files with
+  flipped line endings — previously that hash change silently unviewed everything. Hashes are now
+  CRLF/CR→LF-normalized; old-format marks migrate via a raw-hash fallback and self-heal. Covered by
+  unit tests plus an integration test of the swap-back scenario (with a negative control). Both editors.
+- **Rider 2026 EDT compliance.** Rider 2026.1 hard-errors on synchronous process execution on the EDT.
+  All git-spawning actions moved to pooled threads: branch picker, view/unview (row button, context
+  menu, `v` key, section bulk actions, diff-toolbar toggle), track/untrack, base pick.
+
 ## 0.0.55
 
 - **Rider: durable viewed/comment state.** Marks, untracks, comments, and base picks now force a

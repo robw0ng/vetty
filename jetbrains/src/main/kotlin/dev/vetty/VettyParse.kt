@@ -85,6 +85,21 @@ object VettyParse {
         return todos
     }
 
+    /** EOL-normalize (CRLF / lone CR → LF), byte-lossless otherwise. Content hashes built on this
+     *  survive autocrlf checkout round-trips that flip a file's line endings. */
+    fun eolNormalize(bytes: ByteArray): ByteArray {
+        val out = java.io.ByteArrayOutputStream(bytes.size)
+        var i = 0
+        while (i < bytes.size) {
+            if (bytes[i] == '\r'.code.toByte()) {
+                out.write('\n'.code)
+                if (i + 1 < bytes.size && bytes[i + 1] == '\n'.code.toByte()) i++
+            } else out.write(bytes[i].toInt())
+            i++
+        }
+        return out.toByteArray()
+    }
+
     /** Render comments as `file:line — body` (or `file:start-end` for a range), one per line (1-based). */
     fun exportComments(comments: List<VettyStateService.Comment>): String =
         comments.joinToString("\n") {

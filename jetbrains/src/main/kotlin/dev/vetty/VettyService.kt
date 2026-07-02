@@ -67,7 +67,9 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         saveJob?.cancel()
         saveJob = cs.launch {
             kotlinx.coroutines.delay(800)
-            @Suppress("DEPRECATION") project.save()   // serialize project components → .idea/vetty.xml
+            kotlinx.coroutines.withContext(Dispatchers.EDT) {
+                @Suppress("DEPRECATION") project.save()   // serialize project components → .idea/vetty.xml
+            }
         }
     }
 
@@ -137,6 +139,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     private fun resolveBase() {
         val cur = currentBranch() ?: return
+        curBranch = cur   // viewed/ignored keys hang off this
         if (!pruned) { pruned = true; pruneStale(branches()) }   // GC once per project open
         var b = state.baseByBranch[cur]
         // Validate a remembered LOCAL base once per session — the re-checks are 2 git spawns per reload.
@@ -158,12 +161,12 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     }
 
     // GC: viewed/ignored entries and baseByBranch keys otherwise accumulate forever in vetty.xml as
-    // branches are deleted. Drop entries whose base branch no longer exists locally (origin/* kept).
+    // branches are deleted. Drop entries whose branch no longer exists locally — this also gradually
+    // clears legacy base-keyed entries (origin/* etc.).
     private var pruned = false
     private fun pruneStale(known: List<String>) {
-        val live = { b: String -> b in known || b.startsWith("origin/") }
-        state.viewed.keys.removeAll { !live(it.substringBefore('\t')) }
-        state.ignored.removeAll { !live(it.substringBefore('\t')) }
+        state.viewed.keys.removeAll { it.substringBefore('\t') !in known }
+        state.ignored.removeAll { it.substringBefore('\t') !in known }
         state.baseByBranch.keys.removeAll { it !in known }
     }
 
@@ -265,7 +268,11 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     /** The ref the file list diffs against: HEAD in commit range (uncommitted only), else the merge-base. */
     private fun listRef(): String? = if (isCommitRange()) "HEAD" else baseRef()
 
-    private fun key(rel: String) = "${base()}\t$rel"
+    // Keyed by CURRENT BRANCH, not base: base-keyed marks were shared across sibling branches, so
+    // marking on one clobbered the other's — and the since-review overlay then diffed against a
+    // snapshot taken on the sibling. Falls back to base() before the first resolve.
+    @Volatile private var curBranch: String? = null
+    private fun key(rel: String) = "${curBranch ?: base()}\t$rel"
 
     /** Full changed-file model, grouped Unviewed / Viewed / Untracked(= user-marked noise). */
     fun load(): List<VFile> {
@@ -329,6 +336,10 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     private fun sha1(bytes: ByteArray) =
         java.security.MessageDigest.getInstance("SHA-1").digest(bytes).joinToString("") { "%02x".format(it) }
 
+    /** EOL-normalize (CRLF/CR → LF) so autocrlf checkout round-trips don't flip the hash. The Document
+     *  path is already LF; this makes the docless/disk fallbacks agree with it. */
+    private fun sha1Normalized(bytes: ByteArray) = sha1(VettyParse.eolNormalize(bytes))
+
     private fun fileHash(rel: String): String? {
         val root = repoRoot() ?: return null
         val k = key(rel)
@@ -339,7 +350,8 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
                     val doc = FileDocumentManager.getInstance().getDocument(vf)
                     val stamp = doc?.modificationStamp ?: (vf.timeStamp xor vf.length)
                     hashCache[k]?.let { (s, h) -> if (s == stamp) return@compute h }
-                    val h = sha1(doc?.text?.toByteArray(Charsets.UTF_8) ?: vf.contentsToByteArray())
+                    val h = doc?.text?.toByteArray(Charsets.UTF_8)?.let { sha1(it) }   // doc text is already LF
+                        ?: sha1Normalized(vf.contentsToByteArray())
                     hashCache[k] = stamp to h
                     h
                 }
@@ -347,7 +359,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
                 val f = java.io.File(root, rel)
                 val stamp = f.lastModified() xor f.length()
                 hashCache[k]?.let { (s, h) -> if (s == stamp) return h }
-                val h = sha1(f.readBytes())
+                val h = sha1Normalized(f.readBytes())
                 hashCache[k] = stamp to h
                 h
             }
@@ -522,7 +534,11 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             override fun getActionUpdateThread() = ActionUpdateThread.EDT
             override fun isSelected(e: AnActionEvent) = isViewed(rel)
             override fun setSelected(e: AnActionEvent, state: Boolean) {
-                if (state) markViewed(rel) else unmarkViewed(rel); onChange?.invoke()
+                // markViewed spawns git (hash-object) — keep it off the EDT (Rider 2026+ hard-errors).
+                com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+                    if (state) markViewed(rel) else unmarkViewed(rel)
+                    onChange?.invoke()
+                }
             }
         }))
         return req

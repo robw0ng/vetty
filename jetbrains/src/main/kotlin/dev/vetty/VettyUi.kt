@@ -166,12 +166,18 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         if (t.isNotEmpty()) CopyPasteManager.getInstance().setContents(StringSelection(t.joinToString("\n") { "- ${it.rel}:${it.line} — ${it.text}" }))  // bullet format, same as VS Code
     }
 
+    /** Run [work] (spawns git) off the EDT, then reload. Rider 2026+ hard-errors on synchronous
+     *  process execution on the EDT — every mutating action must route through here. */
+    private fun offEdt(work: () -> Unit) {
+        ApplicationManager.getApplication().executeOnPooledThread { work(); reload() }
+    }
+
     /** Inline row buttons: view/unview (check=View, X=Unview) + Open File. (Track lives in the right-click menu.) */
     private fun fileActions(vf: VFile): List<Triple<javax.swing.Icon, String, () -> Unit>> = buildList {
         if (vf.group != Group.UNTRACKED) {
             val viewed = vf.group == Group.VIEWED
             val icon = if (viewed) AllIcons.Actions.Cancel else AllIcons.Actions.Checked
-            add(Triple(icon, if (viewed) "Unview" else "View") { svc.toggleViewed(vf.rel); reload() })
+            add(Triple(icon, if (viewed) "Unview" else "View") { offEdt { svc.toggleViewed(vf.rel) } })
         }
         add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
     }
@@ -507,8 +513,8 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             add(simpleAction("Open Diff") { activeFile()?.let { showPreview(it.rel) } })
             add(simpleAction("Open File") { activeFile()?.let { svc.openFile(it.rel) } })
             addSeparator()
-            if (inUntracked) add(simpleAction("Track") { selectedFiles().forEach { svc.track(it.rel) }; reload() })
-            else add(simpleAction("Untrack") { selectedFiles().forEach { svc.untrack(it.rel) }; reload() })
+            if (inUntracked) add(simpleAction("Track") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
+            else add(simpleAction("Untrack") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
         }
         com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
             null, group, com.intellij.ide.DataManager.getInstance().getDataContext(tree),
@@ -566,13 +572,13 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         val group = DefaultActionGroup()
         when (grp) {
             Group.UNVIEWED -> group.add(simpleAction("View all (${items.size})") {
-                items.forEach { svc.markViewed(it.rel) }; reload()
+                offEdt { items.forEach { svc.markViewed(it.rel) } }
             })
             Group.VIEWED -> group.add(simpleAction("Unview all (${items.size})") {
-                items.forEach { svc.unmarkViewed(it.rel) }; reload()
+                offEdt { items.forEach { svc.unmarkViewed(it.rel) } }
             })
             Group.UNTRACKED -> group.add(simpleAction("Track all (${items.size})") {
-                items.forEach { svc.track(it.rel) }; reload()
+                offEdt { items.forEach { svc.track(it.rel) } }
             })
         }
         group.add(simpleAction("Open all (${items.size})") { openAllFiles(items) })
@@ -593,10 +599,13 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private fun toggleViewedSelected() {
         val sel = selectedFiles()
         if (sel.isEmpty()) return
-        val advanceFrom = if (sel.size == 1 && !svc.isViewed(sel[0].rel)) sel[0].rel else null
-        sel.forEach { svc.toggleViewed(it.rel) }
-        // reload is async now — advance only after the rebuilt `current` reflects the new groups.
-        reload { advanceFrom?.let { advanceToNextUnviewed(it) } }
+        // Git work (isViewed fallback + hash-object) must stay off the EDT (Rider 2026+ hard-errors).
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val advanceFrom = if (sel.size == 1 && !svc.isViewed(sel[0].rel)) sel[0].rel else null
+            sel.forEach { svc.toggleViewed(it.rel) }
+            // reload is async — advance only after the rebuilt `current` reflects the new groups.
+            reload { advanceFrom?.let { advanceToNextUnviewed(it) } }
+        }
     }
 
     /** Select + preview the next still-unviewed file after `fromRel` (wraps around). */
@@ -791,15 +800,25 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     /** Ancestry-labeled base picker (parent / ancestor / descendant / diverged), shown under [under] or the tree. */
     private fun chooseBase(under: java.awt.Component?) {
-        val items = svc.rankedBranches()
+        // rankedBranches spawns a git process per branch — run off the EDT, then show the popup on it.
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val items = svc.rankedBranches()
+            val curBase = svc.base()
+            ApplicationManager.getApplication().invokeLater({ showBasePopup(items, curBase, under) }, ModalityState.any())
+        }
+    }
+
+    private fun showBasePopup(items: List<VettyService.BranchItem>, curBase: String?, under: java.awt.Component?) {
         if (items.isEmpty()) return
         val group = DefaultActionGroup()
         for (bi in items) {
             val text = if (bi.label.isEmpty()) bi.branch else "${bi.branch}   —   ${bi.label}"
             group.add(object : ToggleAction(text) {
                 override fun getActionUpdateThread() = ActionUpdateThread.EDT
-                override fun isSelected(e: AnActionEvent) = svc.base() == bi.branch
-                override fun setSelected(e: AnActionEvent, state: Boolean) { svc.setBase(bi.branch); svc.setWelcomed(); reload() }
+                override fun isSelected(e: AnActionEvent) = curBase == bi.branch
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    offEdt { svc.setBase(bi.branch); svc.setWelcomed() }   // setBase spawns git (currentBranch)
+                }
             })
         }
         val popup = com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
