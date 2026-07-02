@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.55
+
+- **Rider: durable viewed/comment state.** Marks, untracks, comments, and base picks now force a
+  debounced project save (~0.8s), so a hard IDE crash loses at most the last second instead of
+  everything since the platform's last autosave. Bulk "view all" coalesces into one write. (VS Code
+  already persisted promptly via its Memento store.)
+
 ## 0.0.54
 
 - **Hide whitespace-only** now catches trailing-whitespace, final-newline, and CRLF/EOL-only changes

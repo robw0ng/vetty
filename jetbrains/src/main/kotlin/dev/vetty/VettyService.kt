@@ -57,6 +57,20 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     private val state get() = project.service<VettyStateService>().getState()
 
+    // Crash-durability: PersistentStateComponent only flushes .idea/vetty.xml on the platform's own
+    // schedule (autosave / focus-loss / close), so a hard crash can drop marks made since the last
+    // save. After a data change (viewed / ignored / comments) we force a save, debounced ~0.8s so a
+    // bulk "view all" coalesces into one write. Worst-case loss on crash ≈ the last second, like
+    // VS Code's prompt-async Memento writes.
+    private var saveJob: kotlinx.coroutines.Job? = null
+    private fun scheduleSave() {
+        saveJob?.cancel()
+        saveJob = cs.launch {
+            kotlinx.coroutines.delay(800)
+            @Suppress("DEPRECATION") project.save()   // serialize project components → .idea/vetty.xml
+        }
+    }
+
     private fun repoRoot(): String? = project.basePath
 
     /** Run git in the repo root; returns stdout, or "" on any failure (caller-tolerant). */
@@ -112,6 +126,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     fun setBase(b: String) {
         currentBranch()?.let { state.baseByBranch[it] = b }
         state.base = b
+        scheduleSave()
     }
 
     /**
@@ -293,8 +308,8 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     // --- track / untrack (noise files) ------------------------------------------------------
 
     fun isIgnored(rel: String): Boolean = state.ignored.contains(key(rel))
-    fun untrack(rel: String) { if (base() != null && !isIgnored(rel)) state.ignored.add(key(rel)) }   // push to Untracked/noise
-    fun track(rel: String) { state.ignored.remove(key(rel)) }                       // bring back
+    fun untrack(rel: String) { if (base() != null && !isIgnored(rel)) { state.ignored.add(key(rel)); scheduleSave() } }   // push to Untracked/noise
+    fun track(rel: String) { if (state.ignored.remove(key(rel))) scheduleSave() }   // bring back
 
     private fun untracked(): List<String> =
         git("ls-files", "--others", "--exclude-standard").split("\n").map { it.trim() }.filter { it.isNotEmpty() }
@@ -373,11 +388,11 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         if (base() == null) return   // no base yet → key would be "null\t…" garbage in vetty.xml
         val blob = git("hash-object", "-w", "--", rel).trim()   // snapshot blob for the since-review diff
         val h = fileHash(rel) ?: ""
-        if (h.isNotEmpty() || blob.isNotEmpty()) state.viewed[key(rel)] = "$h\t$blob"
+        if (h.isNotEmpty() || blob.isNotEmpty()) { state.viewed[key(rel)] = "$h\t$blob"; scheduleSave() }
         blobCheck.remove(key(rel))
     }
 
-    fun unmarkViewed(rel: String) { state.viewed.remove(key(rel)); blobCheck.remove(key(rel)) }
+    fun unmarkViewed(rel: String) { if (state.viewed.remove(key(rel)) != null) scheduleSave(); blobCheck.remove(key(rel)) }
 
     fun toggleViewed(rel: String) { if (isViewed(rel)) unmarkViewed(rel) else markViewed(rel) }
 
@@ -628,11 +643,12 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         state.comments.add(VettyStateService.Comment().apply {
             this.file = rel; this.line = line; this.span = span; this.anchor = anchor; this.body = body
         })
+        scheduleSave()
     }
 
-    fun deleteComment(c: VettyStateService.Comment) { state.comments.remove(c) }
+    fun deleteComment(c: VettyStateService.Comment) { state.comments.remove(c); scheduleSave() }
 
-    fun clearComments() { state.comments.clear() }
+    fun clearComments() { state.comments.clear(); scheduleSave() }
 
     /** Export all comments paste-ready for an agent, like VS Code: "Address these review comments:" + bullets. */
     fun exportComments(): String {
@@ -643,6 +659,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     /** Re-paint gutter icons in all open editors and refresh the tool window. */
     fun refreshUiAndGutters() {
+        scheduleSave()   // catches comment body edits + line-drift persistence that don't go through add/delete
         VettyGutter.redecorateAll(project)
         onChange?.invoke()
     }
