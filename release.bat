@@ -2,13 +2,22 @@
 REM One-shot release. Run AFTER committing your own work.
 REM   release.bat                 -> notes = commit subjects since the last tag
 REM   release.bat "fix: message"  -> notes = your message
-REM Does: bump patch in package.json, make ONE release commit for that bump, annotated-tag it,
-REM push master + tag. The tag push fires the GitHub workflow (builds the VSIX + Rider zip, publishes).
-REM It never commits YOUR changes -- commit those first; this only commits the version bump.
+REM Does: if there are new commits since the last tag, bump patch in package.json, make ONE release
+REM commit for that bump, annotated-tag it, push master + tag. The tag push fires the GitHub workflow
+REM (builds the VSIX + Rider zip, publishes). It never commits YOUR changes -- commit those first.
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 set "MSG=%~1"
+
+REM --- last tag + guard: nothing to release if no commits since it ---
+set "LASTTAG="
+for /f "delims=" %%t in ('git describe --tags --abbrev^=0 2^>nul') do set "LASTTAG=%%t"
+if not "!LASTTAG!"=="" (
+  set "COUNT=0"
+  for /f "delims=" %%c in ('git rev-list !LASTTAG!..HEAD --count') do set "COUNT=%%c"
+  if "!COUNT!"=="0" ( echo No new commits since !LASTTAG! - nothing to release. & exit /b 0 )
+)
 
 REM --- bump patch (edits package.json only; no git tag) ---
 call npm version patch --no-git-tag-version >nul 2>&1 || ( echo version bump failed & exit /b 1 )
@@ -21,7 +30,7 @@ if not "!MSG!"=="" (
   > "!NOTES!" echo !MSG!
 ) else (
   set "RANGE="
-  for /f "delims=" %%t in ('git describe --tags --abbrev^=0 2^>nul') do set "RANGE=%%t..HEAD"
+  if not "!LASTTAG!"=="" set "RANGE=!LASTTAG!..HEAD"
   git log !RANGE! --no-merges --grep "^chore(release):" --invert-grep --format="- %%s" > "!NOTES!"
 )
 REM never tag with empty notes
