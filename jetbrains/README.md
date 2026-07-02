@@ -33,7 +33,7 @@ Requires JDK 17. Gradle comes via the wrapper (or use the one bundled in Rider).
 ```bash
 cd jetbrains
 gradle wrapper            # one-time: generates gradlew + the wrapper jar (skip if you'll use the IDE's Gradle)
-./gradlew buildPlugin     # produces build/distributions/vetty-rider-0.1.0.zip
+./gradlew buildPlugin     # produces build/distributions/vetty-rider-<version>.zip (version tracks ../package.json)
 ./gradlew runIde          # launch a sandbox IDE with the plugin
 ```
 

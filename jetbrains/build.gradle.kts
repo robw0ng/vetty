@@ -4,7 +4,11 @@ plugins {
 }
 
 group = "dev.vetty"
-version = providers.gradleProperty("pluginVersion").get()
+// Single source of truth: track the VS Code extension's version (../package.json) so the Rider zip
+// and the VSIX always share release numbers. Falls back to the gradle.properties pluginVersion.
+version = Regex("\"version\"\\s*:\\s*\"([^\"]+)\"")
+    .find(rootProject.file("../package.json").readText())?.groupValues?.get(1)
+    ?: providers.gradleProperty("pluginVersion").get()
 
 repositories {
     mavenCentral()
@@ -28,8 +32,8 @@ intellijPlatform {
     buildSearchableOptions = false // no settings UI to index
     pluginConfiguration {
         ideaVersion {
-            sinceBuild = "233"   // 2023.3+
-            untilBuild = "252.*"
+            sinceBuild = "233"           // 2023.3+
+            untilBuild = provider { null } // no upper bound — loads in current + future IDEs (2026+ etc.)
         }
     }
 }
