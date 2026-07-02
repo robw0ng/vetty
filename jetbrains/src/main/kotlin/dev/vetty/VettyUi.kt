@@ -688,7 +688,13 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     fun reload(onDone: (() -> Unit)? = null) {
         ApplicationManager.getApplication().executeOnPooledThread {
             val files = svc.load(); val todos = svc.todos(); val comments = svc.allComments()
-            ApplicationManager.getApplication().invokeLater({ rebuild(files, todos, comments); onDone?.invoke() }, ModalityState.any())
+            ApplicationManager.getApplication().invokeLater({
+                rebuild(files, todos, comments)
+                // Comments are branch-scoped: after a checkout the open editors keep the old branch's
+                // gutter highlighters (files reload in place — no editorCreated event). Re-paint.
+                VettyGutter.redecorateAll(project)
+                onDone?.invoke()
+            }, ModalityState.any())
         }
     }
 

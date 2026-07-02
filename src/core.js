@@ -255,8 +255,14 @@ function fileHashRaw(cwd, rel) {
 // so marking on one clobbered the other's — and the since-review overlay then diffed against a
 // snapshot taken on the sibling (10271-content showing up while reviewing 10270).
 let activeBranch = null; // current git branch; set by resolveBase before any tree render
+// Scope = repo + branch ('\n' separator — impossible in both git refs and paths). Repo included so
+// two repos in a multi-root workspace sharing a branch name don't share marks. Base param kept as a
+// pre-first-load fallback.
+function stateScope(base) {
+  return `${getCwd() ?? ''}\n${activeBranch || base}`;
+}
 function viewedKey(base) {
-  return `vetty.viewed.${activeBranch || base}`; // base param kept as a pre-first-load fallback
+  return `vetty.viewed.${stateScope(base)}`;
 }
 // Memoize parsed workspaceState values: the getters run per file inside render loops, and the
 // per-call copy (spread / new Set) was the hot spot. Callers share the cached object; every
@@ -334,7 +340,7 @@ async function viewedEntries(cwd, rels) {
 // Ignored marks are a plain per-branch list of paths — a deliberate exclusion, so (unlike viewed) it
 // is not tied to content hash. Ignored files get their own tree group, out of Unviewed/Viewed.
 function ignoredKey(base) {
-  return `vetty.ignored.${activeBranch || base}`;
+  return `vetty.ignored.${stateScope(base)}`;
 }
 function getIgnored(context, base) {
   const k = ignoredKey(base);
@@ -352,7 +358,7 @@ function setIgnored(context, base, set) {
 // Groups: a per-branch { relPath: groupName } map. Lets you bucket changed files (by intent) and stage
 // a bucket at a time — a lightweight, working-copy-only changelist. Shown as a [name] tag on the row.
 function groupsKey(base) {
-  return `vetty.groups.${activeBranch || base}`;
+  return `vetty.groups.${stateScope(base)}`;
 }
 function getGroups(context, base) {
   const k = groupsKey(base);
@@ -475,7 +481,12 @@ const validatedBase = new Set(); // `${branch}\0${base}` already vetted this ses
 /** Resolve the base for the current branch: remembered → else closest ancestor. Mirrors to LAST_BRANCH_KEY. */
 async function resolveBase(context, cwd) {
   const cur = await currentBranch(cwd);
-  if (cur) activeBranch = cur; // viewed/ignored/groups are keyed by this
+  if (cur && cur !== activeBranch) {
+    activeBranch = cur; // viewed/ignored/groups/comments are keyed by this
+    // Comments are branch-scoped: drop the old branch's live threads and hydrate this branch's,
+    // so a persist after the switch can't write branch-A threads under branch-B's key.
+    require('./comments').onBranchChanged(context); // lazy — comments requires core at top level
+  }
   const map = context.workspaceState.get(BASE_BY_BRANCH) || {};
   let base = cur ? map[cur] : null;
   // Validate a remembered LOCAL base once per session (cheap on later loads via the cache).
@@ -508,14 +519,20 @@ async function pruneStaleState(context, cwd) {
   if (prunedStale) return;
   prunedStale = true;
   const keep = new Set(await localBranches(cwd));
-  const live = (b) => keep.has(b);
   for (const key of context.workspaceState.keys()) {
-    const m = key.match(/^vetty\.(viewed|ignored|groups)\.(.+)$/);
-    if (m && !live(m[2])) {
+    const m = key.match(/^vetty\.(viewed|ignored|groups|comments)\.(.+)$/);
+    if (!m) continue;
+    const scope = m[2];
+    const sep = scope.lastIndexOf('\n');
+    // Legacy (pre-repo-scope) keys are unreadable under the new format → always drop.
+    // Scoped keys: prune only THIS repo's dead branches; other repos GC in their own sessions.
+    const dead = sep < 0 || (scope.slice(0, sep) === cwd && !keep.has(scope.slice(sep + 1)));
+    if (dead) {
       stateCache.delete(key);
       await context.workspaceState.update(key, undefined);
     }
   }
+  await context.workspaceState.update('vetty.comments', undefined); // legacy global comments key
   const map = context.workspaceState.get(BASE_BY_BRANCH) || {};
   const pruned = Object.fromEntries(Object.entries(map).filter(([br]) => keep.has(br)));
   if (Object.keys(pruned).length !== Object.keys(map).length) {
@@ -567,6 +584,7 @@ module.exports = {
   gh, ghAvailable, prEnabled, updatePrMode, detectGh,
   TODO_RE, findTodos, untrackedFiles,
   hashCache, fileHash,
+  stateScope,
   getViewed, setViewed, viewedHash, reviewedBlob, isViewed, viewedEntry, viewedEntries,
   getIgnored, setIgnored, getGroups, setGroups, groupNames,
   activeRelPath, aheadBehind, MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,

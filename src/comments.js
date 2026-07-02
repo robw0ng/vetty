@@ -7,10 +7,15 @@ const path = require('path');
 const { lineRef } = require('../lib');
 const {
   app, refreshTree, getCwd, git, gh, ghAvailable, prEnabled, REVIEW_KEY, setBaseFor, updateViewedContext,
+  stateScope,
 } = require('./core');
 
 // --- Local review comments: PR-style inline comment threads, persisted in workspaceState ---
-const COMMENTS_KEY = 'vetty.comments';
+// Scoped per repo+branch like viewed marks: global comments leaked across sibling branches, and
+// re-anchoring/persisting from the wrong branch's content corrupted their stored positions.
+function commentsKey() {
+  return `vetty.comments.${stateScope('')}`;
+}
 let commentController = null;
 const commentThreads = []; // live threads we manage
 const builtDocs = new Set(); // uri.toString() already hydrated this session
@@ -21,7 +26,7 @@ const prThreads = []; // live read-only PR threads (disposed when the review end
 const prShownKeys = new Set(); // comment ids already rendered — additive pulls skip these
 
 function getComments(context) {
-  return context.workspaceState.get(COMMENTS_KEY) || {};
+  return context.workspaceState.get(commentsKey()) || {};
 }
 function relOf(cwd, uri) {
   if (uri.scheme !== 'file') return null;
@@ -57,7 +62,7 @@ async function persistComments(context) {
       comments: t.comments.map(bodyText),
     });
   }
-  await context.workspaceState.update(COMMENTS_KEY, map);
+  await context.workspaceState.update(commentsKey(), map);
 }
 
 /** Find which line `anchor` is on now — the stored line if unchanged, else the nearest line that matches. */
@@ -268,10 +273,20 @@ async function clearAllComments(context) {
   if (ok !== 'Clear all') return;
   for (const t of commentThreads) t.dispose();
   commentThreads.length = 0;
-  await context.workspaceState.update(COMMENTS_KEY, {});
+  await context.workspaceState.update(commentsKey(), {});
   clearPrThreads(); // pulled PR comments cleared too
   refreshTree(); // update the comment-count badge
   vscode.window.showInformationMessage('Cleared all comments.');
+}
+
+/** Branch switched: comments are branch-scoped, so drop the old branch's live threads and hydrate
+ *  the new branch's for the already-open editors. Called by core.resolveBase on change. */
+function onBranchChanged(context) {
+  if (!commentController) return; // activate() not finished yet — initial hydrate covers it
+  for (const t of commentThreads) t.dispose();
+  commentThreads.length = 0;
+  builtDocs.clear();
+  for (const ed of vscode.window.visibleTextEditors) hydrateComments(context, ed.document);
 }
 
 /** Register the comment controller + comment commands, and hydrate stored comments as editors open. */
@@ -494,6 +509,6 @@ async function submitReview(context) {
 }
 
 module.exports = {
-  initComments, updatePrTitle, togglePrMode,
+  initComments, onBranchChanged, updatePrTitle, togglePrMode,
   reviewPr, finishReview, pullPrComments, submitReview,
 };

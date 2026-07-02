@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.61
+
+- **Branch-scoped comments.** Comments were global per file, so they leaked across sibling branches —
+  and re-anchoring against the wrong branch's content could permanently corrupt their stored
+  positions. Now keyed per branch (VS Code: live threads swap on checkout; Rider: comments stamped
+  with their branch, gutters repaint on checkout). Clear Comments clears only the current branch.
+  Comments made before this release reset once. Both editors.
+- **Repo-scoped state keys (VS Code).** Viewed/ignored/groups/comments keys now include the repo
+  root, so two repos in a multi-root workspace sharing a branch name no longer share review state.
+  Existing marks reset once (key format change).
+
 ## 0.0.59
 
 - **Branch-keyed review state.** Viewed/ignored/groups are now keyed by the current branch instead of

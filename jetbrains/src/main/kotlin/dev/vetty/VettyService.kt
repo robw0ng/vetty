@@ -168,6 +168,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         state.viewed.keys.removeAll { it.substringBefore('\t') !in known }
         state.ignored.removeAll { it.substringBefore('\t') !in known }
         state.baseByBranch.keys.removeAll { it !in known }
+        state.comments.removeAll { it.branch !in known }   // also drops legacy branch="" comments once
     }
 
     /** Closest ancestor → conventional local → most-recent other local → current branch. All LOCAL. */
@@ -651,25 +652,32 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         return true
     }
 
-    fun commentsFor(rel: String): List<VettyStateService.Comment> = state.comments.filter { it.file == rel }
+    // Comments are branch-scoped like viewed marks: global comments leaked across sibling branches,
+    // and re-anchoring against the wrong branch's content corrupted their stored positions.
+    private fun onBranch(c: VettyStateService.Comment) = c.branch == (curBranch ?: base())
 
-    fun allComments(): List<VettyStateService.Comment> = state.comments.toList()
+    fun commentsFor(rel: String): List<VettyStateService.Comment> =
+        state.comments.filter { it.file == rel && onBranch(it) }
+
+    fun allComments(): List<VettyStateService.Comment> = state.comments.filter { onBranch(it) }
 
     fun addComment(rel: String, line: Int, span: Int, anchor: String, body: String) {
         state.comments.add(VettyStateService.Comment().apply {
             this.file = rel; this.line = line; this.span = span; this.anchor = anchor; this.body = body
+            this.branch = curBranch ?: base() ?: ""
         })
         scheduleSave()
     }
 
     fun deleteComment(c: VettyStateService.Comment) { state.comments.remove(c); scheduleSave() }
 
-    fun clearComments() { state.comments.clear(); scheduleSave() }
+    fun clearComments() { state.comments.removeAll { onBranch(it) }; scheduleSave() }   // current branch only
 
-    /** Export all comments paste-ready for an agent, like VS Code: "Address these review comments:" + bullets. */
+    /** Export this branch's comments paste-ready for an agent, like VS Code. */
     fun exportComments(): String {
-        if (state.comments.isEmpty()) return ""
-        val bullets = VettyParse.exportComments(state.comments).split("\n").joinToString("\n") { "- $it" }
+        val mine = allComments()
+        if (mine.isEmpty()) return ""
+        val bullets = VettyParse.exportComments(mine).split("\n").joinToString("\n") { "- $it" }
         return "Address these review comments:\n\n$bullets\n"
     }
 

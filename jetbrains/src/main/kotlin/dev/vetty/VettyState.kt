@@ -19,6 +19,7 @@ class VettyStateService : PersistentStateComponent<VettyStateService.S> {
         var span: Int = 0          // extra lines beyond start (0 = single line); end = line + span
         var anchor: String = ""    // trimmed text of the start line, for content re-anchoring
         var body: String = ""
+        var branch: String = ""    // branch the comment was made on — comments are branch-scoped
     }
 
     class S {
