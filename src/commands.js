@@ -246,6 +246,12 @@ async function applyViewed(context, makeViewed) {
   updateViewedContext(context);
   refreshTree();
   vscode.window.setStatusBarMessage(`${next ? 'Marked viewed' : 'Unmarked'} (vs ${base}): ${rel}`, 2500);
+  // Auto-advance to the next unviewed file — matches the tree-row View action, so the diff-viewer's
+  // title "View" button walks the review. Only when this file is actually part of the current review
+  // (in the tree's shown set); marking viewed on some unrelated editor shouldn't yank you into it.
+  if (next && base === app.diffTree?.base && app.diffTree.visibleFiles(cwd).includes(rel)) {
+    await openNextUnviewed(context, base, cwd, rel);
+  }
 }
 
 async function clearViewed(context) {

@@ -137,6 +137,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             producer?.name?.substringAfterLast('/') ?: "Vetty Diff"
         override fun hasContent(): Boolean = producer != null
         fun show(rel: String) {
+            svc.closeFilePreview()   // a diff preview replaces any added-file preview → single preview surface
             producer = object : com.intellij.diff.chains.DiffRequestProducer {
                 override fun getName() = rel
                 override fun process(c: com.intellij.openapi.util.UserDataHolder, i: com.intellij.openapi.progress.ProgressIndicator) =
@@ -145,6 +146,8 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             if (isPreviewOpen()) viewer?.updateRequest(true, null)   // swap content in place
             openPreview(false)   // reveal/select the preview tab (switch back if a pinned tab was active)
         }
+        /** Close the diff preview tab if it's showing (so an added-file preview can take over). */
+        fun closeIfOpen() { if (isPreviewOpen()) closePreview() }
     }
 
     fun showPreview(rel: String) = diffPreview.show(rel)
@@ -275,6 +278,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             add(NestedToggleAction()); add(ExpandAllAction()); add(CollapseAllAction())
         }
         com.intellij.openapi.util.Disposer.register(project, diffPreview)
+        svc.closeDiffPreview = { diffPreview.closeIfOpen() }   // file preview ↔ diff preview: one at a time
         val tb = ActionManager.getInstance().createActionToolbar("Vetty", group, true)
         tb.targetComponent = this
         toolbar = tb.component
@@ -328,15 +332,11 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                     if (e.clickCount == 1) { if (tree.isExpanded(path)) tree.collapsePath(path) else tree.expandPath(path) }
                     return
                 }
-                // New file (no base content) → open the whole file, not a noisy diff-vs-empty (like VS Code),
-                // UNLESS it has a since-review snapshot to diff against.
-                if (isNewFile(vf)) {
-                    if (e.clickCount >= 2) { cancelClick(); svc.openFile(vf.rel) }
-                    else scheduleClick { svc.openFilePreview(vf.rel) }
-                    return
-                }
-                if (e.clickCount >= 2) { cancelClick(); svc.openDiffPinned(vf) }  // double → open fully (pinned)
-                else scheduleClick { showPreview(vf.rel) }                         // single → in-place preview (swaps)
+                // Everything goes through the ONE diff-preview surface (added files diff vs empty) — mixing
+                // a file-preview tab for added files with the diff preview for modified caused two tabs to
+                // fight. Single → in-place preview (swaps); double → pinned diff tab.
+                if (e.clickCount >= 2) { cancelClick(); svc.openDiffPinned(vf) }
+                else scheduleClick { showPreview(vf.rel) }
             }
         })
         tree.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
@@ -556,7 +556,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private fun openAllFiles(items: List<VFile>) {
         if (items.size > 30 &&
             Messages.showYesNoDialog(project, "Open ${items.size} editors?", "Vetty", null) != Messages.YES) return
-        for (f in items) if (isNewFile(f)) svc.openFile(f.rel) else svc.openDiffPinned(f)
+        for (f in items) svc.openDiffPinned(f)
     }
 
     /** Right-click a section header → bulk View all / Unview all / Open all for that section. */
@@ -581,9 +581,6 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             com.intellij.openapi.ui.popup.JBPopupFactory.ActionSelectionAid.MNEMONICS, true
         ).show(com.intellij.ui.awt.RelativePoint(e))
     }
-
-    /** Added/untracked file with no since-review snapshot — nothing to diff against. */
-    private fun isNewFile(f: VFile) = (f.status == "A" || f.status == "U") && !svc.hasSinceReviewDiff(f.rel)
 
     /** All selected changed files (multi-select); the most-recently clicked one. */
     private fun selectedFiles(): List<VFile> =
@@ -611,10 +608,8 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         next?.let { select(it.rel); openRow(it) }
     }
 
-    /** Open a row the right way: whole file for new files, else the in-place diff preview. */
-    private fun openRow(f: VFile) {
-        if (isNewFile(f)) svc.openFilePreview(f.rel) else showPreview(f.rel)
-    }
+    /** Open a row in the shared diff preview (single surface for added + modified). */
+    private fun openRow(f: VFile) = showPreview(f.rel)
 
     private fun navUnviewed(dir: Int) {
         val unviewed = current.filter { it.group == Group.UNVIEWED }

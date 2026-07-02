@@ -260,11 +260,14 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         // --relative scopes to the opened solution dir (cwd) and yields cwd-relative paths.
         val nums = VettyParse.parseNumstat(git("diff", "--relative", "--numstat", "--diff-filter=d", ref))
         // Whitespace-only modified files: present in the full diff but absent from `git diff -w`.
-        // Flagged (not removed) so the UI can hide them as a VIEW filter — progress counts stay honest
-        // and the "⚠ filtered" marker shows, like VS Code. Only computed while the toggle is on.
+        // Use -w --numstat, NOT --name-only: `--name-only -w` still LISTS trailing-whitespace /
+        // final-newline / CRLF-only files (so they'd never hide), but --numstat emits no row for them.
+        // Keep binary files (`-\t-\tpath`) as real changes so hide-whitespace never swallows an image.
+        // Flagged (not removed) so the UI can hide them as a VIEW filter — progress stays honest and the
+        // "⚠ filtered" marker shows, like VS Code. Only computed while the toggle is on.
         val real = if (state.hideWhitespace)
-            git("diff", "--relative", "-w", "--name-only", "--diff-filter=d", ref)
-                .split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toHashSet()
+            git("diff", "--relative", "-w", "--numstat", "--diff-filter=d", ref)
+                .split("\n").mapNotNull { it.split("\t").getOrNull(2)?.trim()?.ifEmpty { null } }.toHashSet()
         else null
         val files = ArrayList<VFile>()
         val seen = HashSet<String>()
@@ -398,13 +401,24 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         vfile(rel)?.let { FileEditorManager.getInstance(project).openFile(it, true) }
     }
 
-    /** Open in the swap-on-click preview tab — used for added/untracked files (no base to diff against). */
-    fun openFilePreview(rel: String) {
-        vfile(rel)?.let { openPreview(it) }
-    }
-
     /** The last file/diff opened by a single-click, so the next click can replace it (preview-tab feel). */
     private var lastPreview: VirtualFile? = null
+
+    // Added/untracked files preview as a plain file tab (above); modified files preview in the diff
+    // preview tab (VettyDiffPreview). Those are two separate surfaces, so switching between an added
+    // and a modified file left BOTH open. The tool window wires this to close the diff preview when a
+    // file preview opens; openFilePreview→file and diffPreview→file close each other for one preview.
+    var closeDiffPreview: (() -> Unit)? = null
+
+    /** Close the transient file-preview tab (called by the diff preview so only one preview shows). */
+    fun closeFilePreview() {
+        val prev = lastPreview ?: return
+        lastPreview = null
+        cs.launch(Dispatchers.EDT) {
+            val fem = FileEditorManager.getInstance(project)
+            if (fem.isFileOpen(prev)) fem.closeFile(prev)
+        }
+    }
 
     /**
      * Open a VirtualFile, replacing the previously single-clicked one (diff editors ignore the
@@ -424,6 +438,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     }
 
     private fun openPreview(file: VirtualFile, line: Int? = null, col: Int = 0, len: Int = 0) {
+        closeDiffPreview?.invoke()  // a file preview replaces the diff preview → single preview surface
         val prev = lastPreview      // capture + set synchronously on EDT so concurrent opens don't race
         lastPreview = file
         cs.launch(Dispatchers.EDT) {
@@ -528,7 +543,19 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     private fun openTodoInternal(rel: String, line: Int, pinned: Boolean) {
         val vf = vfile(rel) ?: return
         val l = (line - 1).coerceAtLeast(0)
-        if (pinned) openPinned(vf, l) else openPreview(vf, l)
+        val (col, len) = todoSpan(vf, l)   // select the marker → end of line, like a search hit
+        if (pinned) openPinned(vf, l, col, len) else openPreview(vf, l, col, len)
+    }
+
+    /** Column + length to select on a TODO line: from the marker keyword to end of line (0,0 if none). */
+    private fun todoSpan(vf: VirtualFile, line: Int): Pair<Int, Int> {
+        val text = com.intellij.openapi.application.ReadAction.compute<String?, RuntimeException> {
+            FileDocumentManager.getInstance().getDocument(vf)?.let { d ->
+                if (line < d.lineCount) d.getText(com.intellij.openapi.util.TextRange(d.getLineStartOffset(line), d.getLineEndOffset(line))) else null
+            }
+        } ?: return 0 to 0
+        val m = TODO_RE.find(text) ?: return 0 to 0
+        return m.range.first to (text.length - m.range.first)
     }
 
     // --- TODO scanner -----------------------------------------------------------------------

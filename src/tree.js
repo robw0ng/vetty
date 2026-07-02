@@ -125,12 +125,14 @@ class DiffTree {
         // +/- line counts (binary files report "-\t-"); skipped silently.
         const ns = await git(cwd, ['diff', '--numstat', '--diff-filter=d', this.listRef]);
         parseNumstat(ns).forEach((v, k) => stat.set(k, v));
-        // Files with real (non-whitespace) changes — anything else is formatting-only.
-        // Only computed while the hide-whitespace toggle is on (saves a git spawn per refresh).
+        // Files with real (non-whitespace) changes — anything else is formatting-only. Use -w --numstat,
+        // NOT --name-only: `--name-only -w` still LISTS trailing-whitespace / final-newline / CRLF-only
+        // files (so they'd never hide), but --numstat emits no row for them. Keep binary files (`-\t-\tpath`)
+        // as real changes so hide-whitespace never swallows an image. Only computed while the toggle is on.
         if (this.hideWhitespace) {
-          for (const r of (await git(cwd, ['diff', '--name-only', '-w', '--diff-filter=d', this.listRef])).split('\n')) {
-            const rel = r.trim();
-            if (rel) realChanged.add(rel);
+          for (const line of (await git(cwd, ['diff', '-w', '--numstat', '--diff-filter=d', this.listRef])).split('\n')) {
+            const parts = line.split('\t');
+            if (parts.length >= 3 && parts[2].trim()) realChanged.add(parts[2].trim());
           }
         }
         for (const rel of await untrackedFiles(cwd)) {
@@ -398,8 +400,11 @@ async function openTodo(rel, line) {
   const cwd = getCwd();
   if (!cwd) return;
   const uri = vscode.Uri.file(path.join(cwd, rel));
-  const sel = new vscode.Range(line - 1, 0, line - 1, 0);
   const doc = await vscode.workspace.openTextDocument(uri);
+  const l = Math.min(Math.max(line - 1, 0), Math.max(doc.lineCount - 1, 0));
+  const text = doc.lineAt(l).text;
+  const m = text.match(core.TODO_RE); // highlight the marker → end of line, like a search hit
+  const sel = m ? new vscode.Range(l, m.index, l, text.length) : new vscode.Range(l, 0, l, 0);
   await vscode.window.showTextDocument(doc, { selection: sel });
 }
 

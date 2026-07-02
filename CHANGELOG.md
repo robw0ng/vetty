@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.0.54
+
+- **Hide whitespace-only** now catches trailing-whitespace, final-newline, and CRLF/EOL-only changes
+  (detects real changes via `git diff -w --numstat` instead of `--name-only`, which still listed
+  them). Fixes files showing in the list with a seemingly-empty diff after a prettier pass, and the
+  toggle appearing to do nothing. Binary files are kept (never swallowed by the filter). Both editors.
+- **TODO click highlights** the marker through end of line, like a search hit. Both editors.
+- **Diff-viewer "View" button auto-advances** to the next unviewed file — but only when the file is
+  part of the current review, so marking viewed on an unrelated editor no longer yanks you into it.
+- **Rider: single diff-preview tab** — added and modified files share one preview surface again;
+  the earlier split (added-as-file vs modified-as-diff) left both tabs open and caused focus glitches.
+- **Rider: preview coordination** — the file preview (TODO / search-match jumps) and the diff preview
+  now close each other, so only one preview tab is ever open.
+- VS Code: **View All / Unview All** toolbar icons un-swapped (View All = eye, Unview All = eye-closed).
+
 ## 0.0.51
 
 - Docs: READMEs updated for the JetBrains port and current feature set; spec MDs removed.
