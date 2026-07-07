@@ -171,14 +171,34 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         state.comments.removeAll { it.branch !in known }   // also drops legacy branch="" comments once
     }
 
-    /** Closest ancestor → conventional local → most-recent other local → current branch. All LOCAL. */
+    /** When another branch's tip EQUALS this one's (fresh stacked branch, no commits yet), commit
+     *  topology is symmetric — parent and child look identical. The reflog breaks the tie: its oldest
+     *  entry is the branch's creation moment, and the branch created EARLIER is the parent. */
+    private fun branchCreatedAt(branch: String): Long =
+        // %gd + --date=unix = the reflog ENTRY time (%ct would be the commit time — identical for
+        // same-tip branches, useless as a tie-break). Oldest entry = branch creation.
+        git("reflog", "show", "--date=unix", "--format=%gd", branch).trim().split("\n")
+            .lastOrNull { it.isNotBlank() }
+            ?.let { Regex("""@\{(\d+)\}""").find(it)?.groupValues?.get(1)?.toLongOrNull() }
+            ?: Long.MAX_VALUE   // no reflog → can't claim parenthood
+
+    /** Same-tip parent → closest ancestor → conventional local → most-recent other local → current branch. */
     private fun inferClosestAncestor(cur: String): String {
         if (cur in TRUNKS) return cur   // a trunk has no parent; every merged branch is an "ancestor" → diff working changes
         val others = branches().filter { it != cur }
         var best: String? = null; var bestAhead = Int.MAX_VALUE
+        val sameTip = ArrayList<String>()
         for ((b, ab) in parMap(others.take(50)) { it to aheadBehind(it) }) {   // parallel — 50 sequential spawns stall the load
             val (behind, ahead) = ab ?: continue
-            if (behind == 0 && ahead in 1..PARENT_MAX_AHEAD && ahead < bestAhead) { best = b; bestAhead = ahead }
+            if (behind == 0 && ahead == 0) sameTip.add(b)
+            else if (behind == 0 && ahead in 1..PARENT_MAX_AHEAD && ahead < bestAhead) { best = b; bestAhead = ahead }
+        }
+        // Same-tip branch created before this one = the direct parent (this branch has no commits yet).
+        if (sameTip.isNotEmpty()) {
+            val curBorn = branchCreatedAt(cur)
+            sameTip.map { it to branchCreatedAt(it) }
+                .filter { it.second < curBorn }
+                .maxByOrNull { it.second }?.let { return it.first }
         }
         if (best != null) return best
         for (c in TRUNKS) if (c in others) return c
@@ -204,12 +224,18 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         val cur = currentBranch()
         val others = branches().filter { it != cur }.take(50)
         val rels = parMap(others) { it to aheadBehind(it) }.toMap()   // parallel — picker opens in ~1 spawn, not 50
+        // Same-tip tie-break (fresh stacked branch): created-earlier = parent, created-later = fresh child.
+        val curBorn = if (cur != null && rels.values.any { it != null && it.first == 0 && it.second == 0 })
+            branchCreatedAt(cur) else null
         val items = others.map { b ->
             val ab = rels[b]
             var label = ""; var rank = 5; var ahead = Int.MAX_VALUE
             if (ab != null) {
                 val (behind, a) = ab; ahead = a
                 when {
+                    behind == 0 && a == 0 ->
+                        if (curBorn != null && branchCreatedAt(b) < curBorn) { label = "parent · same commit"; rank = 0; ahead = 0 }
+                        else { label = "same commit"; rank = 4 }
                     behind == 0 && a > 0 -> { label = "ancestor · $a ahead"; rank = 1 }
                     a == 0 && behind > 0 -> { label = "descendant · $behind behind"; rank = 4 }
                     a > 0 && behind > 0 -> { label = "↑$a ↓$behind"; rank = 3 }
@@ -218,8 +244,9 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             }
             BranchItem(b, label, rank, ahead)
         }.toMutableList()
-        // Direct parent = nearest ancestor (fewest commits ahead) — only within the cap; else leave it "ancestor".
-        items.filter { it.rank == 1 }.minByOrNull { it.ahead }?.let { p ->
+        // Direct parent = nearest ancestor (fewest commits ahead) — only within the cap; else leave it
+        // "ancestor". A same-commit parent (rank 0 above) is closer than any strict ancestor → no promotion.
+        if (items.none { it.rank == 0 }) items.filter { it.rank == 1 }.minByOrNull { it.ahead }?.let { p ->
             if (p.ahead <= PARENT_MAX_AHEAD) items[items.indexOf(p)] = p.copy(label = "parent · ${p.ahead} ahead", rank = 0)
         }
         items.sortWith(compareBy({ it.rank }, { it.ahead }))

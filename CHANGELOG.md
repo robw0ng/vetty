@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.63
+
+- **Same-tip parent resolution.** A freshly stacked branch (no commits of its own yet) shares its
+  tip with its parent, which made the parent invisible to ancestor inference — Vetty picked the
+  grandparent and showed the parent's commits as if they were yours. Same-tip branches are now
+  parent candidates, tie-broken by reflog creation time (the branch created earlier is the parent).
+  The picker labels them `parent · same commit`; a fresh child sorts with descendants. Falls back to
+  the old behavior when no reflog is available. Both editors.
+
 ## 0.0.61
 
 - **Branch-scoped comments.** Comments were global per file, so they leaked across sibling branches —

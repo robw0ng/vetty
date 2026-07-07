@@ -50,28 +50,42 @@ async function pickBranch(context, cwd) {
     const others = (await localBranches(cwd)).filter((n) => n !== cur);
     const rels = new Map();
     await Promise.all(others.slice(0, MAX_REL_BRANCHES).map(async (b) => rels.set(b, await aheadBehind(cwd, b))));
+    // A branch at the SAME tip is either this branch's parent (created earlier — fresh stacked
+    // branch with no commits yet) or a fresh child (created later). Reflog breaks the tie.
+    const curBorn = [...rels.values()].some((ab) => ab && ab.ahead === 0 && ab.behind === 0)
+      ? await core.branchCreatedAt(cwd, cur)
+      : null;
 
-    const items = others.map((b) => {
+    const items = [];
+    for (const b of others) {
       const ab = rels.get(b);
       let description = '';
       let rank = 5; // sort bucket: parent(0) ancestor(1) same(2) diverged(3) descendant(4) unknown(5)
       let ahead = Infinity;
       if (ab) {
         ahead = ab.ahead;
-        if (ab.behind === 0 && ab.ahead > 0) (description = `ancestor · ${ab.ahead} ahead`), (rank = 1);
+        if (ab.behind === 0 && ab.ahead === 0) {
+          const older = curBorn !== null && (await core.branchCreatedAt(cwd, b)) < curBorn;
+          if (older) (description = 'parent · same commit'), (rank = 0), (ahead = 0);
+          else (description = 'same commit'), (rank = 4);
+        }
+        else if (ab.behind === 0 && ab.ahead > 0) (description = `ancestor · ${ab.ahead} ahead`), (rank = 1);
         else if (ab.ahead === 0 && ab.behind > 0) (description = `descendant · ${ab.behind} behind`), (rank = 4);
         else if (ab.ahead > 0 && ab.behind > 0) (description = `↑${ab.ahead} ↓${ab.behind}`), (rank = 3);
         else (description = 'up to date'), (rank = 2);
       }
-      return { label: b, description, branch: b, rank, ahead };
-    });
+      items.push({ label: b, description, branch: b, rank, ahead });
+    }
 
     // Direct parent = the closest ancestor, but only if it's reasonably near (else it's just an old
-    // merged branch the current branch contains — not a base).
-    const parent = items.filter((i) => i.rank === 1).sort((a, b) => a.ahead - b.ahead)[0];
-    if (parent && parent.ahead <= PARENT_MAX_AHEAD) {
-      parent.description = `parent · ${parent.ahead} ahead`;
-      parent.rank = 0;
+    // merged branch the current branch contains — not a base). A same-commit parent (rank 0 above)
+    // is closer than any strict ancestor, so it wins and no promotion happens.
+    if (!items.some((i) => i.rank === 0)) {
+      const parent = items.filter((i) => i.rank === 1).sort((a, b) => a.ahead - b.ahead)[0];
+      if (parent && parent.ahead <= PARENT_MAX_AHEAD) {
+        parent.description = `parent · ${parent.ahead} ahead`;
+        parent.rank = 0;
+      }
     }
     // Sort by bucket; within ancestors/parent, nearest first (fewest commits ahead) = stack order.
     items.sort((a, b) => a.rank - b.rank || a.ahead - b.ahead);

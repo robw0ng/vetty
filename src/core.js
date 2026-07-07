@@ -431,9 +431,26 @@ async function localBranches(cwd) {
   }
 }
 
+/** When another branch's tip EQUALS this one's (fresh stacked branch, no commits yet), commit
+ *  topology is symmetric — parent and child look identical. The reflog breaks the tie: its oldest
+ *  entry is the branch's creation moment, and the branch created EARLIER is the parent. */
+async function branchCreatedAt(cwd, branch) {
+  try {
+    // %gd + --date=unix = the reflog ENTRY time (%ct would be the commit time — identical for
+    // same-tip branches, useless as a tie-break). Oldest entry = branch creation.
+    const lines = (await git(cwd, ['reflog', 'show', '--date=unix', '--format=%gd', branch])).trim().split('\n').filter(Boolean);
+    const m = lines.length ? lines[lines.length - 1].match(/@\{(\d+)\}/) : null;
+    return m ? parseInt(m[1], 10) : Infinity;
+  } catch {
+    return Infinity; // no reflog → can't claim parenthood
+  }
+}
+
 // Git stores no parent, so infer it: a branch whose tip is an ANCESTOR of HEAD (behind === 0, ahead > 0)
 // is one this branch was built on; the DIRECT parent is the ancestor closest to HEAD (fewest commits
-// ahead). Falls back to a conventional base branch, then the most recent other branch.
+// ahead). A branch at the SAME tip that was created earlier is the parent of a fresh stacked branch
+// (diff = working changes only — not the parent's commits). Falls back to a conventional base branch,
+// then the most recent other branch.
 async function defaultBase(cwd) {
   const cur = await currentBranch(cwd);
   const names = await localBranches(cwd);
@@ -445,15 +462,29 @@ async function defaultBase(cwd) {
 
   let parent = null;
   let parentAhead = Infinity;
+  const sameTip = [];
   await Promise.all(
     others.map(async (b) => {
       const ab = await aheadBehind(cwd, b);
-      if (ab && ab.behind === 0 && ab.ahead > 0 && ab.ahead < parentAhead && ab.ahead <= PARENT_MAX_AHEAD) {
+      if (!ab) return;
+      if (ab.behind === 0 && ab.ahead === 0) sameTip.push(b);
+      else if (ab.behind === 0 && ab.ahead > 0 && ab.ahead < parentAhead && ab.ahead <= PARENT_MAX_AHEAD) {
         parentAhead = ab.ahead;
         parent = b;
       }
     })
   );
+  // Same-tip branch created before this one = the direct parent (this branch has no commits yet).
+  if (sameTip.length && cur) {
+    const curBorn = await branchCreatedAt(cwd, cur);
+    let best = null;
+    let bestBorn = -Infinity;
+    for (const b of sameTip) {
+      const born = await branchCreatedAt(cwd, b);
+      if (born < curBorn && born > bestBorn) (bestBorn = born), (best = b);
+    }
+    if (best) return best;
+  }
   if (parent) return parent;
   for (const c of TRUNK_NAMES) {
     if (c !== cur && names.includes(c)) return c;
@@ -588,7 +619,7 @@ module.exports = {
   getViewed, setViewed, viewedHash, reviewedBlob, isViewed, viewedEntry, viewedEntries,
   getIgnored, setIgnored, getGroups, setGroups, groupNames,
   activeRelPath, aheadBehind, MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,
-  currentBranch, localBranches, defaultBase, setBaseFor, resolveBase, lastBranch, pruneStaleState,
+  currentBranch, localBranches, defaultBase, branchCreatedAt, setBaseFor, resolveBase, lastBranch, pruneStaleState,
   updateViewedContext, shortRef,
   DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff,
 };
