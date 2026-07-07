@@ -252,8 +252,11 @@ class SearchView {
       }
     });
     syncUi();
-    vscode.postMessage({ type: 'scope', value: state.scope }); // re-apply persisted scope on (re)load
-    if (state.filter) vscode.postMessage({ type: 'filter', value: state.filter });
+    // (Re)sync ALL filter state to the tree. The webview can be re-created while the tree keeps its
+    // old filter + search matches — the box looked empty but the tree stayed stuck filtered.
+    vscode.postMessage({ type: 'scope', value: state.scope });
+    vscode.postMessage({ type: 'filter', value: state.filter });
+    vscode.postMessage({ type: 'searchClear' });
   </script>
 </body></html>`;
     postSearchCounts(); // seed counts + group dropdown now that the webview is live

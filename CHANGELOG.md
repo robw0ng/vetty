@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.64
+
+- **VS Code: stale search filter.** If the Search webview got re-created (view moved/hidden), the
+  box came back empty while the tree stayed filtered to the old search. The webview now re-syncs
+  scope, name filter, and search state to the tree on every (re)load.
+
 ## 0.0.63
 
 - **Same-tip parent resolution.** A freshly stacked branch (no commits of its own yet) shares its
