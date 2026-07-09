@@ -20,6 +20,7 @@ const STATUS_COLOR = {
   T: 'gitDecoration.modifiedResourceForeground',
   R: 'gitDecoration.renamedResourceForeground',
   U: 'gitDecoration.untrackedResourceForeground',
+  D: 'gitDecoration.deletedResourceForeground',
 };
 const fileDecorations = {
   _emitter: new vscode.EventEmitter(),
@@ -102,16 +103,36 @@ class DiffTree {
     const cwd = getCwd();
     this.base = cwd ? await resolveBase(this.context, cwd) : lastBranch(this.context);
     this.baseRef = cwd && this.base ? await mergeBaseRef(cwd, this.base) : this.base;
+    // Rebase/merge detection: the merge-base moved → purge marks for files the rebase changed,
+    // so their stale snapshots can't present the base's incoming changes as reviewable work.
+    if (cwd && this.base) await core.purgeOnMergeBaseChange(this.context, cwd, this.base, this.baseRef);
     // In "since last commit" mode, list working-tree-vs-HEAD (like Source Control); else the branch's changes.
     this.listRef = diffRange(this.context) === 'commit' ? 'HEAD' : this.baseRef;
     const files = [];
     const added = new Set();
+    const deleted = new Set(); // removed vs base — opens as base-content ↔ empty
     const status = new Map();
     const stat = new Map();
     const realChanged = new Set();
+    const staged = new Set(); // in the index (git diff --cached)
+    const staleStaged = new Set(); // staged AND edited since (working ≠ index) — restage before commit
     if (cwd && this.base) {
       try {
-        const out = await git(cwd, ['diff', '--name-status', '--diff-filter=d', this.listRef]);
+        // All six git reads are independent — run them concurrently (sequential spawns made every
+        // refresh, and the stage markers with it, take ~half a second on Windows).
+        const [out, ns, wOut, untracked, cachedOut, dirtyOut] = await Promise.all([
+          git(cwd, ['diff', '--name-status', this.listRef]),
+          git(cwd, ['diff', '--numstat', this.listRef]),
+          // Files with real (non-whitespace) changes — anything else is formatting-only. Use -w --numstat,
+          // NOT --name-only: `--name-only -w` still LISTS trailing-whitespace / final-newline / CRLF-only
+          // files (so they'd never hide), but --numstat emits no row for them. Keep binary files
+          // (`-\t-\tpath`) as real changes so hide-whitespace never swallows an image. Toggle-gated.
+          this.hideWhitespace ? git(cwd, ['diff', '-w', '--numstat', this.listRef]) : Promise.resolve(''),
+          untrackedFiles(cwd),
+          // Staged markers: `*` = in the index, `^` = staged but edited since (index ≠ working tree).
+          git(cwd, ['diff', '--cached', '--name-only']),
+          git(cwd, ['diff', '--name-only']),
+        ]);
         for (const line of out.split('\n')) {
           const parts = line.split('\t');
           if (parts.length < 2) continue;
@@ -121,25 +142,27 @@ class DiffTree {
           files.push(rel);
           status.set(rel, letter);
           if (letter === 'A') added.add(rel);
+          if (letter === 'D') deleted.add(rel);
         }
         // +/- line counts (binary files report "-\t-"); skipped silently.
-        const ns = await git(cwd, ['diff', '--numstat', '--diff-filter=d', this.listRef]);
         parseNumstat(ns).forEach((v, k) => stat.set(k, v));
-        // Files with real (non-whitespace) changes — anything else is formatting-only. Use -w --numstat,
-        // NOT --name-only: `--name-only -w` still LISTS trailing-whitespace / final-newline / CRLF-only
-        // files (so they'd never hide), but --numstat emits no row for them. Keep binary files (`-\t-\tpath`)
-        // as real changes so hide-whitespace never swallows an image. Only computed while the toggle is on.
-        if (this.hideWhitespace) {
-          for (const line of (await git(cwd, ['diff', '-w', '--numstat', '--diff-filter=d', this.listRef])).split('\n')) {
-            const parts = line.split('\t');
-            if (parts.length >= 3 && parts[2].trim()) realChanged.add(parts[2].trim());
-          }
+        for (const line of wOut.split('\n')) {
+          const parts = line.split('\t');
+          if (parts.length >= 3 && parts[2].trim()) realChanged.add(parts[2].trim());
         }
-        for (const rel of await untrackedFiles(cwd)) {
+        for (const rel of untracked) {
           if (status.has(rel)) continue;
           files.push(rel);
           status.set(rel, 'U');
           added.add(rel); // no base version → open as file, not diff
+        }
+        for (const r of cachedOut.split('\n')) {
+          const rel = r.trim();
+          if (rel) staged.add(rel);
+        }
+        for (const r of dirtyOut.split('\n')) {
+          const rel = r.trim();
+          if (rel && staged.has(rel)) staleStaged.add(rel); // working ≠ index on a staged file
         }
       } catch {
         // leave empty
@@ -147,9 +170,12 @@ class DiffTree {
     }
     this.files = files;
     this.added = added;
+    this.deleted = deleted;
     this.status = status;
     this.stat = stat;
     this.realChanged = realChanged;
+    this.staged = staged;
+    this.staleStaged = staleStaged;
     // Drop group assignments for files no longer changed (committed/reverted). Skip in commit mode,
     // where `files` is only the uncommitted subset — pruning then would wrongly forget branch files.
     if (cwd && this.base && diffRange(this.context) !== 'commit') {
@@ -312,8 +338,10 @@ class DiffTree {
   _file(cwd, rel, isIgnored) {
     const dir = path.dirname(rel);
     const hits = this.searchMatches && this.searchMatches.get(rel);
+    // Leading stage marker: `*` staged, `^` staged but edited since staging (restage before commit).
+    const stageMark = this.staleStaged?.has(rel) ? '^ ' : this.staged?.has(rel) ? '* ' : '';
     const it = new vscode.TreeItem(
-      path.basename(rel), // filename first, like Source Control
+      stageMark + path.basename(rel), // filename first, like Source Control
       hits ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.None
     );
     const s = this.stat.get(rel);
@@ -329,7 +357,11 @@ class DiffTree {
     it.id = `file:${this.base}:${rel}`; // stable id so reveal() can match across refreshes
     it.resourceUri = vscode.Uri.file(path.join(cwd, rel));
     it.contextValue = isIgnored ? 'file-ignored' : viewed ? 'file-viewed' : 'file-unviewed';
-    it.tooltip = `${rel} — ${isIgnored ? 'untracked' : viewed ? 'viewed' : 'unviewed'}`;
+    const stageNote = this.staleStaged?.has(rel)
+      ? ' — staged, but modified since (restage before commit)'
+      : this.staged?.has(rel) ? ' — staged' : '';
+    const delNote = this.deleted.has(rel) ? ' — deleted by this branch' : '';
+    it.tooltip = `${rel} — ${isIgnored ? 'untracked' : viewed ? 'viewed' : 'unviewed'}${delNote}${stageNote}`;
     // During a search, clicking the row toggles its matches (no command) instead of opening.
     if (!hits) {
       // Added file → open whole file, UNLESS it has a since-review snapshot to diff against.
@@ -380,6 +412,7 @@ class TodoTree {
       it.tooltip = `${t.rel}:${t.line}\n\n${t.text}`;
       it.iconPath = new vscode.ThemeIcon('checklist');
       it.todo = t; // for multi-select copy
+      it.contextValue = 'vettyTodo'; // gates the row menu/buttons (the "No TODOs" row has none)
       it.command = { command: 'vetty.openTodo', title: 'Open', arguments: [t.rel, t.line] };
       return it;
     });
@@ -394,6 +427,33 @@ async function copyTodos() {
   if (!lines.length) return;
   await vscode.env.clipboard.writeText(lines.join('\n'));
   vscode.window.setStatusBarMessage(`Copied ${lines.length} TODO(s)`, 2000);
+}
+
+/** Right-click "Go to" on a TODO row (row click does the same; this covers the menu). */
+async function todoOpenItem(item) {
+  if (item?.todo) await openTodo(item.todo.rel, item.todo.line);
+}
+
+/** Copy the clicked TODO row (or the multi-selection) as paste-ready bullets. */
+async function todoCopyItems(item, sel) {
+  const items = Array.isArray(sel) && sel.length ? sel : item ? [item] : [];
+  const lines = items.filter((i) => i?.todo).map((i) => `- ${i.todo.rel}:${i.todo.line} — ${i.todo.text.trim()}`);
+  if (!lines.length) return;
+  await vscode.env.clipboard.writeText(lines.join('\n'));
+  vscode.window.setStatusBarMessage(`Copied ${lines.length} TODO(s)`, 2000);
+}
+
+/** Toolbar: copy ALL currently-shown TODOs (respects the active Review filters) as bullets. */
+async function exportTodos() {
+  const cwd = getCwd();
+  const visible = cwd && app.diffTree ? new Set(app.diffTree.visibleFiles(cwd)) : null;
+  const items = (app.todoTree?.items || []).filter((t) => !visible || visible.has(t.rel));
+  if (!items.length) {
+    vscode.window.showInformationMessage('No TODOs to export.');
+    return;
+  }
+  await vscode.env.clipboard.writeText(items.map((t) => `- ${t.rel}:${t.line} — ${t.text.trim()}`).join('\n') + '\n');
+  vscode.window.showInformationMessage(`Copied ${items.length} TODO(s) to the clipboard.`);
 }
 
 async function openTodo(rel, line) {
@@ -418,19 +478,23 @@ async function openMatch(rel, line, col, len) {
   await vscode.window.showTextDocument(doc, { selection: sel });
 }
 
-/** Open one file's diff: since-review overlay wins when active; otherwise the range's base. */
+/** Open one file's diff: since-review overlay wins when active; otherwise the range's base.
+ *  Deleted files diff against an EMPTY right side (there's no working file to show). */
 function openOneDiff(context, cwd, base, rel, opts) {
   const fileUri = vscode.Uri.file(path.join(cwd, rel));
+  const gone = app.diffTree?.deleted?.has(rel);
+  const rightUri = gone ? baseUriFor(fileUri, '') : fileUri; // ref '' → the provider returns ''
+  const rightLabel = gone ? 'deleted' : 'working';
   if (hasSinceReviewDiff(context, cwd, base, rel)) {
     const blob = reviewedBlob(getViewed(context, base), rel);
-    return vscode.commands.executeCommand('vscode.diff', blobUriFor(fileUri, blob), fileUri, `${rel} (last viewed)`, opts);
+    return vscode.commands.executeCommand('vscode.diff', blobUriFor(fileUri, blob), rightUri, `${rel} (last viewed ↔ ${rightLabel})`, opts);
   }
   if (diffRange(context) === 'commit') {
     // Working tree vs HEAD = uncommitted changes only. New/untracked files → empty left side.
-    return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, 'HEAD'), fileUri, `${rel} (uncommitted)`, opts);
+    return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, 'HEAD'), rightUri, `${rel} (uncommitted${gone ? ' ↔ deleted' : ''})`, opts);
   }
   const ref = (app.diffTree && app.diffTree.baseRef) || base; // whole branch: diff against the merge-base
-  return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, ref), fileUri, `${rel} (${base} ↔ working)`, opts);
+  return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, ref), rightUri, `${rel} (${base} ↔ ${rightLabel})`, opts);
 }
 
 /** Open a changed file the right way: whole file for new files, else its diff. */
@@ -543,7 +607,7 @@ async function toggleSinceReview(context) {
 
 module.exports = {
   DiffTree, TodoTree, fileDecorations,
-  copyTodos, openTodo, openMatch,
+  copyTodos, openTodo, openMatch, todoOpenItem, todoCopyItems, exportTodos,
   openOneDiff, openReviewFile, openNextUnviewed, navigateUnviewed,
   expandAll, collapseFolders, showMore,
   toggleNesting, toggleWhitespace, toggleRange, toggleSinceReview,

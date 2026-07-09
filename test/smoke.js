@@ -105,7 +105,16 @@ assert.ok(
   assert.ok(core.isViewed(dir, legacy, rel), 'old-format (raw) mark still viewed');
   assert.strictEqual(legacy[rel].h, core.fileHash(dir, rel), 'old-format mark self-heals to the new format');
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  // Deletion tombstone: a mark on a deleted file counts as viewed while the file stays gone,
+  // and re-flags unviewed if the file comes back.
+  const goneRel = 'gone.js';
+  return core.viewedEntry(dir, goneRel).then((entry) => {
+    assert.deepStrictEqual(entry, { h: 'D', b: null }, 'deleted file gets the D tombstone');
+    const tomb = { [goneRel]: entry };
+    assert.ok(core.isViewed(dir, tomb, goneRel), 'tombstone viewed while file is gone');
+    fs.writeFileSync(path.join(dir, goneRel), 'resurrected\n');
+    assert.ok(!core.isViewed(dir, tomb, goneRel), 'tombstone unviewed once the file returns');
+    fs.rmSync(dir, { recursive: true, force: true });
+    console.log('ok — all smoke checks passed');
+  });
 }
-
-console.log('ok — all smoke checks passed');

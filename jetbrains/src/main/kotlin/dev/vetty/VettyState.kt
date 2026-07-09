@@ -25,6 +25,7 @@ class VettyStateService : PersistentStateComponent<VettyStateService.S> {
     class S {
         var base: String? = null                                   // mirror of the resolved base (sync reader)
         var baseByBranch: MutableMap<String, String> = LinkedHashMap()  // per-branch remembered base
+        var mergeBaseByBranch: MutableMap<String, String> = LinkedHashMap()  // per-branch last-seen merge-base (rebase detection)
         var diffRange: String = "branch"  // "branch" (merge-base) | "commit" (vs HEAD)
         var sinceReview: Boolean = true   // overlay: unviewed files diff against their last-reviewed snapshot
         var nested: Boolean = false       // tree (nested folders) vs flat list

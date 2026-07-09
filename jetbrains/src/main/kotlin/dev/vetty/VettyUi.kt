@@ -113,6 +113,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private var scope = "All"   // All | Unviewed | Added | Modified
     private var searchMatches: Map<String, List<Match>>? = null  // null = no active content search
     private var lastTodos: List<Todo> = emptyList()
+    private var visibleTodos: List<Todo> = emptyList()  // the shown slice — Export TODOs copies these
     private var lastComments: List<VettyStateService.Comment> = emptyList()
     private var hoverRow = -1     // row + icon index currently under the cursor (for the hover highlight)
     private var hoverIcon = -1
@@ -172,15 +173,31 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         ApplicationManager.getApplication().executeOnPooledThread { work(); reload() }
     }
 
-    /** Inline row buttons: view/unview (check=View, X=Unview) + Open File. (Track lives in the right-click menu.) */
+    /** Inline row buttons: view/unview (check=View, X=Unview) or Track for noise rows, + Open File.
+     *  (Untrack lives only in the right-click menu.) */
     private fun fileActions(vf: VFile): List<Triple<javax.swing.Icon, String, () -> Unit>> = buildList {
         if (vf.group != Group.UNTRACKED) {
             val viewed = vf.group == Group.VIEWED
             val icon = if (viewed) AllIcons.Actions.Cancel else AllIcons.Actions.Checked
             add(Triple(icon, if (viewed) "Unview" else "View") { offEdt { svc.toggleViewed(vf.rel) } })
+        } else {
+            add(Triple(AllIcons.General.Add, "Track") { offEdt { svc.track(vf.rel) } })
         }
         add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
     }
+
+    /** Inline row buttons on a comment row: Copy + Delete. */
+    private fun commentActions(c: VettyStateService.Comment): List<Triple<javax.swing.Icon, String, () -> Unit>> = listOf(
+        Triple(AllIcons.Actions.Copy, "Copy") { copyComments(listOf(c)) },
+        Triple(AllIcons.Actions.GC, "Delete") { svc.deleteComment(c); svc.refreshUiAndGutters() },
+    )
+
+    /** Inline row button on a TODO row: Copy. */
+    private fun todoActions(t: Todo): List<Triple<javax.swing.Icon, String, () -> Unit>> = listOf(
+        Triple(AllIcons.Actions.Copy, "Copy") {
+            CopyPasteManager.getInstance().setContents(StringSelection("- ${t.rel}:${t.line} — ${t.text}"))
+        },
+    )
 
     // ---- filter / search panel (name filter + scope + content search over the shown files) ----
 
@@ -386,13 +403,36 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         todoTree.selectionModel.selectionMode = TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION  // Ctrl/Shift multi-select
         todoTree.cellRenderer = cellRenderer
         todoTree.addMouseListener(object : MouseAdapter() {
+            override fun mousePressed(e: MouseEvent) = todoPopup(e)
+            override fun mouseReleased(e: MouseEvent) = todoPopup(e)
             override fun mouseClicked(e: MouseEvent) {
-                if (!SwingUtilities.isLeftMouseButton(e)) return
+                if (e.isPopupTrigger || !SwingUtilities.isLeftMouseButton(e)) return
                 if (e.isControlDown || e.isShiftDown || e.isMetaDown) return  // multi-select gesture → don't open
                 val p = todoTree.getPathForLocation(e.x, e.y) ?: return
                 val t = (p.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? Todo ?: return
+                // Inline row button hit? (Copy icon sits at the left, before the text)
+                val rb = todoTree.getPathBounds(p)
+                val acts = todoActions(t)
+                if (rb != null && e.x >= rb.x && e.x < rb.x + acts.size * ROW_ICON) {
+                    cancelClick(); acts[((e.x - rb.x) / ROW_ICON).coerceIn(0, acts.size - 1)].third.invoke(); return
+                }
                 if (e.clickCount >= 2) { cancelClick(); svc.openTodoPinned(t.rel, t.line) }
                 else scheduleClick { svc.openTodo(t.rel, t.line) }
+            }
+        })
+        todoTree.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+            override fun mouseMoved(e: MouseEvent) {
+                var tip: String? = null
+                var hand = false
+                val row = todoTree.getRowForLocation(e.x, e.y)
+                if (row >= 0) {
+                    val t = (todoTree.getPathForRow(row)?.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? Todo
+                    val rb = todoTree.getRowBounds(row)
+                    if (t != null && rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) { hand = true; tip = "Copy" }
+                }
+                todoTree.toolTipText = tip
+                todoTree.cursor = if (hand) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+                                  else java.awt.Cursor.getDefaultCursor()
             }
         })
 
@@ -408,7 +448,32 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                 if (e.isControlDown || e.isShiftDown || e.isMetaDown) return  // multi-select gesture → don't jump
                 val p = commentTree.getPathForLocation(e.x, e.y) ?: return
                 val c = (p.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? VettyStateService.Comment ?: return
+                // Inline row button hit? (Copy / Delete icons sit at the left, before the text)
+                val rb = commentTree.getPathBounds(p)
+                val acts = commentActions(c)
+                if (rb != null && e.x >= rb.x && e.x < rb.x + acts.size * ROW_ICON) {
+                    acts[((e.x - rb.x) / ROW_ICON).coerceIn(0, acts.size - 1)].third.invoke()
+                    return
+                }
                 svc.openTodo(c.file, c.line + 1)   // jump to the commented line in the working file
+            }
+        })
+        commentTree.addMouseMotionListener(object : java.awt.event.MouseMotionAdapter() {
+            override fun mouseMoved(e: MouseEvent) {
+                var tip: String? = null
+                var hand = false
+                val row = commentTree.getRowForLocation(e.x, e.y)
+                if (row >= 0) {
+                    val c = (commentTree.getPathForRow(row)?.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? VettyStateService.Comment
+                    val rb = commentTree.getRowBounds(row)
+                    if (c != null && rb != null && e.x >= rb.x && e.x < rb.x + 2 * ROW_ICON) {
+                        hand = true
+                        tip = commentActions(c)[((e.x - rb.x) / ROW_ICON).coerceIn(0, 1)].second
+                    }
+                }
+                commentTree.toolTipText = tip
+                commentTree.cursor = if (hand) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+                                     else java.awt.Cursor.getDefaultCursor()
             }
         })
 
@@ -436,9 +501,19 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             }, BorderLayout.NORTH)
             add(commentScroll, BorderLayout.CENTER)
         }
+        // TODOs section header toolbar: Export (copy all shown as bullets).
+        val todoTools = ActionManager.getInstance().createActionToolbar(
+            "VettyTodos", DefaultActionGroup().apply { add(ExportTodosAction()) }, true)
+        todoTools.targetComponent = this
+        val todoPane = JPanel(BorderLayout()).apply {
+            add(JPanel(BorderLayout()).apply {
+                add(todoHeader, BorderLayout.WEST); add(todoTools.component, BorderLayout.EAST)
+            }, BorderLayout.NORTH)
+            add(todoScroll, BorderLayout.CENTER)
+        }
         // Three peer sections — Review / TODOs / Comments — each resizable (drag) AND collapsible (click header).
         bottomSplitter = OnePixelSplitter(true, 0.5f).apply {
-            firstComponent = pane(todoHeader, todoScroll)
+            firstComponent = todoPane
             secondComponent = commentPane
         }
         mainSplitter = OnePixelSplitter(true, 0.6f).apply {
@@ -510,8 +585,12 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             if (!inUntracked) {
                 add(simpleAction(if (activeFile()?.group == Group.VIEWED) "Unview" else "View") { toggleViewedSelected() })
             }
-            add(simpleAction("Open Diff") { activeFile()?.let { showPreview(it.rel) } })
-            add(simpleAction("Open File") { activeFile()?.let { svc.openFile(it.rel) } })
+            // Whole selection: single file → in-place preview; several → pinned tabs for each.
+            add(simpleAction("Open Diff") {
+                val sel = selectedFiles()
+                if (sel.size == 1) showPreview(sel[0].rel) else sel.forEach { svc.openDiffPinned(it) }
+            })
+            add(simpleAction("Open File") { selectedFiles().forEach { svc.openFile(it.rel) } })
             addSeparator()
             if (inUntracked) add(simpleAction("Track") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
             else add(simpleAction("Untrack") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
@@ -529,6 +608,27 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private fun copyComments(list: List<VettyStateService.Comment>) =
         CopyPasteManager.getInstance().setContents(  // bullet format, same as VS Code's copy-comment
             StringSelection(VettyParse.exportComments(list).split("\n").joinToString("\n") { "- $it" }))
+
+    /** Right-click a TODO (or several) in the TODOs pane → Go to / Copy. */
+    private fun todoPopup(e: MouseEvent) {
+        if (!e.isPopupTrigger) return
+        val p = todoTree.getPathForLocation(e.x, e.y) ?: return
+        if (todoTree.selectionPaths?.contains(p) != true) todoTree.selectionPath = p  // right-click outside selection → reselect
+        val sel = selectedTodos()
+        if (sel.isEmpty()) return
+        val group = DefaultActionGroup().apply {
+            if (sel.size == 1) {
+                add(simpleAction("Go to") { svc.openTodo(sel[0].rel, sel[0].line) })
+                add(simpleAction("Copy") { copyTodos() })
+            } else {
+                add(simpleAction("Copy ${sel.size}") { copyTodos() })
+            }
+        }
+        com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
+            null, group, com.intellij.ide.DataManager.getInstance().getDataContext(todoTree),
+            com.intellij.openapi.ui.popup.JBPopupFactory.ActionSelectionAid.MNEMONICS, true
+        ).show(com.intellij.ui.awt.RelativePoint(e))
+    }
 
     /** Right-click a comment (or several) in the Comments pane → Go to / Edit / Copy / Delete. */
     private fun commentPopup(e: MouseEvent) {
@@ -738,6 +838,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         // Slice TODOs by the Review panel's active filters (scope/name/search), like VS Code.
         val shownRels = shown.map { it.rel }.toHashSet()
         val shownTodos = todos.filter { it.rel in shownRels }
+        visibleTodos = shownTodos   // for the Export TODOs toolbar action
         val todoRoot = DefaultMutableTreeNode()
         shownTodos.forEach { todoRoot.add(DefaultMutableTreeNode(it)) }
         todoTree.model = DefaultTreeModel(todoRoot)
@@ -909,6 +1010,14 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         override fun actionPerformed(e: AnActionEvent) { svc.toggleSinceReview(); reload() }
     }
 
+    private inner class ExportTodosAction :
+        UiAction("Export TODOs", "Copy all shown TODOs as file:line — text", AllIcons.Actions.Copy) {
+        override fun actionPerformed(e: AnActionEvent) {
+            CopyPasteManager.getInstance().setContents(
+                StringSelection(visibleTodos.joinToString("\n") { "- ${it.rel}:${it.line} — ${it.text}" }))
+        }
+    }
+
     private inner class ExportAction :
         UiAction("Export Comments", "Copy all comments as file:line — note", AllIcons.Actions.Copy) {
         override fun actionPerformed(e: AnActionEvent) {
@@ -925,7 +1034,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         }
     }
 
-    /** Wraps the text renderer and appends clickable inline icons after a file row. */
+    /** Wraps the text renderer and prepends clickable inline icons on file rows AND comment rows. */
     private inner class VettyCellRenderer : javax.swing.tree.TreeCellRenderer {
         private val text = VettyTextRenderer(svc) { rel -> searchMatches?.get(rel)?.size ?: 0 }
         override fun getTreeCellRendererComponent(
@@ -933,12 +1042,20 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             leaf: Boolean, row: Int, hasFocus: Boolean
         ): java.awt.Component {
             val comp = text.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus)
-            val vf = (value as? DefaultMutableTreeNode)?.userObject as? VFile ?: return comp
+            val obj = (value as? DefaultMutableTreeNode)?.userObject
+            val acts = when (obj) {
+                is VFile -> fileActions(obj)
+                is VettyStateService.Comment -> commentActions(obj)
+                is Todo -> todoActions(obj)
+                else -> return comp
+            }
+            // Hover highlight only tracks the main tree; comment-row icons still get cursor + tooltip.
+            val hoverHere = obj is VFile
             val h = comp.preferredSize.height.coerceAtLeast(18)
             return JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
                 isOpaque = false
-                fileActions(vf).forEachIndexed { i, (icon, tip, _) ->
-                    add(IconCell(icon, row == hoverRow && i == hoverIcon).apply {
+                acts.forEachIndexed { i, (icon, tip, _) ->
+                    add(IconCell(icon, hoverHere && row == hoverRow && i == hoverIcon).apply {
                         toolTipText = tip
                         preferredSize = java.awt.Dimension(ROW_ICON, h)
                     })
@@ -967,6 +1084,7 @@ private class IconCell(icon: javax.swing.Icon, private val hovered: Boolean) : J
 private fun statusInfo(f: VFile): Pair<String, FileStatus> = when {
     f.group == Group.UNTRACKED -> "U" to FileStatus.UNKNOWN
     f.status == "A" || f.status == "U" -> "A" to FileStatus.ADDED   // git-untracked NEW file is an addition
+    f.status == "D" -> "D" to FileStatus.DELETED
     f.status == "R" -> "R" to FileStatus.MODIFIED
     f.status == "C" -> "C" to FileStatus.MODIFIED
     else -> "M" to FileStatus.MODIFIED
@@ -1018,7 +1136,9 @@ private class VettyTextRenderer(
                 val color = status.color
                 icon = FileTypeManager.getInstance().getFileTypeByFileName(name).icon
                 append("$letter  ", SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, color))
-                append(name, SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, color))  // filename colored by status
+                // Leading stage marker: `*` staged, `^` staged but edited since staging.
+                val stage = if (obj.stageMark.isEmpty()) "" else "${obj.stageMark} "
+                append(stage + name, SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, color))  // filename colored by status
                 val extras = buildList {
                     val mc = matchCount(obj.rel)
                     if (mc > 0) add("$mc match${if (mc == 1) "" else "es"}")

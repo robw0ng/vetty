@@ -31,6 +31,7 @@ function refreshTree() {
   app.diffTree?.updateProgress();
   require('./search').postSearchCounts(); // lazy: search requires core at top level
   app.todoTree?.refresh(); // re-slice TODOs to the active filter
+  app.commentsTree?.refresh();
 }
 
 // Git paths are repo-root-relative, so everything must join against the toplevel — which can sit
@@ -290,6 +291,7 @@ function reviewedBlob(map, rel) {
 function isViewed(cwd, map, rel) {
   const h = viewedHash(map[rel]);
   if (!h) return false;
+  if (h === 'D') return !fs.existsSync(path.join(cwd, rel)); // deletion tombstone: viewed while still gone
   const cur = fileHash(cwd, rel);
   if (h === cur) return true;
   // Migration: marks made before EOL-normalized hashing stored the raw-bytes hash. If that still
@@ -303,8 +305,11 @@ function isViewed(cwd, map, rel) {
   return false;
 }
 
-/** Snapshot the working file into git's object store and return { h, b } for the viewed map. */
+/** Snapshot the working file into git's object store and return { h, b } for the viewed map.
+ *  A DELETED file gets the tombstone hash 'D' (not a valid sha1, can't collide): it counts as
+ *  viewed while the file stays gone and re-flags unviewed if the file comes back. */
 async function viewedEntry(cwd, rel) {
+  if (!fs.existsSync(path.join(cwd, rel))) return { h: 'D', b: null };
   const h = fileHash(cwd, rel);
   let b = null;
   try {
@@ -320,19 +325,27 @@ async function viewedEntry(cwd, rel) {
  *  aborts --stdin-paths entirely). Returns { rel: { h, b } }. */
 async function viewedEntries(cwd, rels) {
   const map = {};
+  // Deleted files get tombstones and would abort the --stdin-paths batch — split them out first.
+  const present = rels.filter((r) => {
+    if (fs.existsSync(path.join(cwd, r))) return true;
+    map[r] = { h: 'D', b: null };
+    return false;
+  });
   let blobs = null;
   try {
-    blobs = (await gitStdin(cwd, ['hash-object', '-w', '--stdin-paths'], rels.map((r) => path.join(cwd, r)).join('\n') + '\n'))
-      .trim()
-      .split('\n');
-    if (blobs.length !== rels.length) blobs = null;
+    blobs = present.length
+      ? (await gitStdin(cwd, ['hash-object', '-w', '--stdin-paths'], present.map((r) => path.join(cwd, r)).join('\n') + '\n'))
+          .trim()
+          .split('\n')
+      : [];
+    if (blobs.length !== present.length) blobs = null;
   } catch {
     blobs = null;
   }
   if (blobs) {
-    rels.forEach((rel, i) => (map[rel] = { h: fileHash(cwd, rel), b: blobs[i].trim() || null }));
+    present.forEach((rel, i) => (map[rel] = { h: fileHash(cwd, rel), b: blobs[i].trim() || null }));
   } else {
-    for (const rel of rels) map[rel] = await viewedEntry(cwd, rel);
+    for (const rel of present) map[rel] = await viewedEntry(cwd, rel);
   }
   return map;
 }
@@ -551,7 +564,7 @@ async function pruneStaleState(context, cwd) {
   prunedStale = true;
   const keep = new Set(await localBranches(cwd));
   for (const key of context.workspaceState.keys()) {
-    const m = key.match(/^vetty\.(viewed|ignored|groups|comments)\.(.+)$/);
+    const m = key.match(/^vetty\.(viewed|ignored|groups|comments|mergeBase)\.(.+)$/);
     if (!m) continue;
     const scope = m[2];
     const sep = scope.lastIndexOf('\n');
@@ -569,6 +582,28 @@ async function pruneStaleState(context, cwd) {
   if (Object.keys(pruned).length !== Object.keys(map).length) {
     await context.workspaceState.update(BASE_BY_BRANCH, pruned);
   }
+}
+
+/** The merge-base moved (base was rebased/merged into the branch) → fully unview marks whose file
+ *  content changed: their since-review snapshots predate the rebase, so the overlay would present
+ *  the BASE's incoming changes as reviewable work. Untouched files keep their marks. */
+async function purgeOnMergeBaseChange(context, cwd, base, mergeBase) {
+  if (!mergeBase) return;
+  const k = `vetty.mergeBase.${stateScope(base)}`;
+  const prev = context.workspaceState.get(k);
+  if (prev === mergeBase) return;
+  if (prev) {
+    const viewed = getViewed(context, base);
+    let changed = false;
+    for (const rel of Object.keys(viewed)) {
+      if (!isViewed(cwd, viewed, rel)) {
+        delete viewed[rel]; // mark + snapshot both go — the file behaves fresh-unviewed
+        changed = true;
+      }
+    }
+    if (changed) await setViewed(context, base, viewed);
+  }
+  await context.workspaceState.update(k, mergeBase);
 }
 
 /** Drives the editor-title icon: eye when unviewed, eye-closed when viewed. */
@@ -620,6 +655,7 @@ module.exports = {
   getIgnored, setIgnored, getGroups, setGroups, groupNames,
   activeRelPath, aheadBehind, MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,
   currentBranch, localBranches, defaultBase, branchCreatedAt, setBaseFor, resolveBase, lastBranch, pruneStaleState,
+  purgeOnMergeBaseChange,
   updateViewedContext, shortRef,
   DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff,
 };

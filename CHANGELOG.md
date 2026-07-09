@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.0.72
+
+- **Deletions are reviewable.** Files removed by the branch show as red `D` rows with `−N` counts and
+  open as a base-content ↔ empty diff. Mark-viewed works via a tombstone: stays viewed while the file
+  stays gone, re-flags if it comes back. Unstaged renames now show honestly as `D` old + `U` new;
+  staged/committed renames stay a single `R` row. Both editors.
+- **Rebase-aware marks.** When the merge-base moves (base rebased/merged into the branch), marks whose
+  file content changed are fully purged — snapshot included — so the since-review overlay never
+  presents the base's incoming changes as review work. Untouched files keep their marks. Both editors.
+- **Comments section in VS Code** (below Todos), mirroring Rider: click to jump, right-click
+  Go to / Edit / Copy / Delete (multi-select), Export + Clear + Pull-PR on the section header.
+  Comment actions removed from the Review view's menu.
+- **Inline row buttons**: Copy + Delete on comment rows, Copy on TODO rows, with right-click menus
+  (Go to / Copy) and an Export TODOs toolbar button — both editors.
+- **Stage markers**: leading `*` (staged) / `^` (staged but edited since) on file names, updating
+  live. All per-refresh git reads now run in parallel (was sequential — noticeably faster).
+- **Menus**: VS Code right-click reorganized to match Rider (review actions, separator, management;
+  Untrack at the bottom, Track only on untracked rows with an inline Track button). Rider context-menu
+  Open Diff / Open File act on the whole selection.
+
 ## 0.0.64
 
 - **VS Code: stale search filter.** If the Search webview got re-created (view moved/hidden), the

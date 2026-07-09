@@ -35,7 +35,8 @@ import java.nio.charset.StandardCharsets
 enum class Group { UNVIEWED, VIEWED, UNTRACKED }
 
 data class VFile(val rel: String, val status: String, val add: Int, val del: Int, val group: Group,
-                 val wsOnly: Boolean = false)  // whitespace-only change (set while the hide-whitespace toggle is on)
+                 val wsOnly: Boolean = false,   // whitespace-only change (set while the hide-whitespace toggle is on)
+                 val stageMark: String = "")    // "*" staged, "^" staged but edited since, "" unstaged
 
 data class Todo(val rel: String, val line: Int, val text: String)
 
@@ -168,6 +169,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         state.viewed.keys.removeAll { it.substringBefore('\t') !in known }
         state.ignored.removeAll { it.substringBefore('\t') !in known }
         state.baseByBranch.keys.removeAll { it !in known }
+        state.mergeBaseByBranch.keys.removeAll { it !in known }
         state.comments.removeAll { it.branch !in known }   // also drops legacy branch="" comments once
     }
 
@@ -296,6 +298,22 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     /** The ref the file list diffs against: HEAD in commit range (uncommitted only), else the merge-base. */
     private fun listRef(): String? = if (isCommitRange()) "HEAD" else baseRef()
 
+    /** The merge-base moved (base was rebased/merged into the branch) → fully unview marks whose file
+     *  content changed: their since-review snapshots predate the rebase, so the overlay would present
+     *  the BASE's incoming changes as reviewable work. Untouched files keep their marks. */
+    private fun purgeOnMergeBaseChange() {
+        val mb = baseRef() ?: return
+        val br = curBranch ?: return
+        val prev = state.mergeBaseByBranch[br]
+        if (prev == mb) return
+        if (prev != null) {
+            val stale = state.viewed.keys.filter { it.substringBefore('\t') == br && !isViewed(it.substringAfter('\t')) }
+            if (stale.isNotEmpty()) { state.viewed.keys.removeAll(stale.toSet()); scheduleSave() }
+        }
+        state.mergeBaseByBranch[br] = mb
+        scheduleSave()
+    }
+
     // Keyed by CURRENT BRANCH, not base: base-keyed marks were shared across sibling branches, so
     // marking on one clobbered the other's — and the since-review overlay then diffed against a
     // snapshot taken on the sibling. Falls back to base() before the first resolve.
@@ -306,28 +324,42 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     fun load(): List<VFile> {
         baseRefCache = null   // recompute merge-base once per refresh (cheap reuse across diff clicks)
         resolveBase()         // per-branch base memory + ancestor inference; re-resolves on branch switch
+        purgeOnMergeBaseChange()
         val ref = listRef() ?: return emptyList()
-        // --relative scopes to the opened solution dir (cwd) and yields cwd-relative paths.
-        val nums = VettyParse.parseNumstat(git("diff", "--relative", "--numstat", "--diff-filter=d", ref))
-        // Whitespace-only modified files: present in the full diff but absent from `git diff -w`.
-        // Use -w --numstat, NOT --name-only: `--name-only -w` still LISTS trailing-whitespace /
-        // final-newline / CRLF-only files (so they'd never hide), but --numstat emits no row for them.
-        // Keep binary files (`-\t-\tpath`) as real changes so hide-whitespace never swallows an image.
-        // Flagged (not removed) so the UI can hide them as a VIEW filter — progress stays honest and the
-        // "⚠ filtered" marker shows, like VS Code. Only computed while the toggle is on.
+        // All five git reads are independent — run them concurrently (sequential spawns made every
+        // refresh, and the stage markers with it, noticeably slow). --relative scopes to the opened
+        // solution dir (cwd) and yields cwd-relative paths.
+        val outs = parMap(listOf(
+            listOf("diff", "--relative", "--numstat", ref),
+            listOf("diff", "--relative", "--name-status", ref),
+            listOf("ls-files", "--others", "--exclude-standard"),
+            // Staged markers: `*` = in the index, `^` = staged but edited since (index ≠ working tree).
+            listOf("diff", "--relative", "--cached", "--name-only"),
+            listOf("diff", "--relative", "--name-only"),
+            // Whitespace-only modified files: present in the full diff but absent from `git diff -w`.
+            // Use -w --numstat, NOT --name-only: `--name-only -w` still LISTS trailing-whitespace /
+            // final-newline / CRLF-only files, but --numstat emits no row for them. Binary files
+            // (`-\t-\tpath`) stay "real" so hide-whitespace never swallows an image. Toggle-gated.
+            if (state.hideWhitespace) listOf("diff", "--relative", "-w", "--numstat", ref) else null,
+        ).filterNotNull()) { git(*it.toTypedArray()) }
+        val nums = VettyParse.parseNumstat(outs[0])
+        val untrackedList = outs[2].split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+        val stagedSet = outs[3].split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toHashSet()
+        val dirtySet = outs[4].split("\n").map { it.trim() }.filter { it.isNotEmpty() }.toHashSet()
         val real = if (state.hideWhitespace)
-            git("diff", "--relative", "-w", "--numstat", "--diff-filter=d", ref)
-                .split("\n").mapNotNull { it.split("\t").getOrNull(2)?.trim()?.ifEmpty { null } }.toHashSet()
+            outs[5].split("\n").mapNotNull { it.split("\t").getOrNull(2)?.trim()?.ifEmpty { null } }.toHashSet()
         else null
+        fun mark(rel: String) = if (rel in stagedSet) (if (rel in dirtySet) "^" else "*") else ""
         val files = ArrayList<VFile>()
         val seen = HashSet<String>()
-        for ((status, rel) in VettyParse.parseNameStatus(git("diff", "--relative", "--name-status", "--diff-filter=d", ref))) {
+        for ((status, rel) in VettyParse.parseNameStatus(outs[1])) {
             seen.add(rel)
             val (add, del) = nums[rel] ?: (0 to 0)
-            files.add(VFile(rel, status, add, del, groupFor(rel), wsOnly = real != null && status != "U" && rel !in real))
+            files.add(VFile(rel, status, add, del, groupFor(rel),
+                wsOnly = real != null && status != "U" && rel !in real, stageMark = mark(rel)))
         }
         // Git-untracked NEW files are regular changes (status "U"); only user-untracked files go to Untracked.
-        for (rel in untracked()) {
+        for (rel in untrackedList) {
             if (rel in seen) continue
             files.add(VFile(rel, "U", 0, 0, groupFor(rel)))
         }
@@ -406,6 +438,10 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     fun isViewed(rel: String): Boolean {
         val entry = state.viewed[key(rel)] ?: return false
         val storedHash = entry.substringBefore('\t')
+        if (storedHash == "D") {   // deletion tombstone: viewed while the file is still gone
+            val root = repoRoot() ?: return false
+            return !java.io.File(root, rel).exists()
+        }
         val cur = fileHash(rel)
         if (storedHash.isNotEmpty() && cur != null && storedHash == cur) return true   // fast path
         // Fallback: does the current (in-memory) content git-hash to the stored snapshot blob?
@@ -426,6 +462,12 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     fun markViewed(rel: String) {
         if (base() == null) return   // no base yet → key would be "null\t…" garbage in vetty.xml
+        val root = repoRoot()
+        if (root != null && !java.io.File(root, rel).exists()) {
+            // Deletion tombstone ('D' — not a valid sha1): viewed while the file stays gone,
+            // re-flags unviewed if it comes back.
+            state.viewed[key(rel)] = "D\t"; scheduleSave(); blobCheck.remove(key(rel)); return
+        }
         val blob = git("hash-object", "-w", "--", rel).trim()   // snapshot blob for the since-review diff
         val h = fileHash(rel) ?: ""
         if (h.isNotEmpty() || blob.isNotEmpty()) { state.viewed[key(rel)] = "$h\t$blob"; scheduleSave() }
@@ -536,9 +578,10 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         return ""
     }
 
-    /** Build the diff request for a file (used by the in-place preview processor AND the pinned tab). */
+    /** Build the diff request for a file (used by the in-place preview processor AND the pinned tab).
+     *  A DELETED file (no VirtualFile) diffs base content against an empty right side. */
     fun buildDiffRequest(rel: String): com.intellij.diff.requests.DiffRequest {
-        val vf = vfile(rel) ?: throw com.intellij.diff.chains.DiffRequestProducerException("Not found: $rel")
+        val vf = vfile(rel)
         lastDiffRel = rel   // so commenting from a unified diff (synthetic doc) still knows the file
         val blob = reviewedBlob(rel)
         val hasReview = sinceReview() && blob != null && !isViewed(rel)  // overlay on + snapshot + changed since
@@ -548,6 +591,26 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             else -> showBase(baseRef() ?: "HEAD", rel) to "${base()} ↔ working"          // whole branch
         }
         val factory = DiffContentFactory.getInstance()
+        val name = rel.substringAfterLast('/')
+        if (vf == null) {
+            // Deleted: base content ↔ empty. Keep the Viewed toggle so a deletion can be vetted too.
+            val dftype = FileTypeManager.getInstance().getFileTypeByFileName(name)
+            val dleft = leftText.replace("\r\n", "\n").replace("\r", "\n")
+            val req = SimpleDiffRequest("$name (deleted)",
+                factory.create(project, dleft, dftype), factory.create(project, "", dftype), label, "deleted")
+            req.putUserData(DiffUserDataKeysEx.CONTEXT_ACTIONS, listOf<AnAction>(object :
+                ToggleAction("Viewed", "Mark this file viewed", AllIcons.Actions.Checked) {
+                override fun getActionUpdateThread() = ActionUpdateThread.EDT
+                override fun isSelected(e: AnActionEvent) = isViewed(rel)
+                override fun setSelected(e: AnActionEvent, state: Boolean) {
+                    com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+                        if (state) markViewed(rel) else unmarkViewed(rel)
+                        onChange?.invoke()
+                    }
+                }
+            }))
+            return req
+        }
         val ftype = FileTypeManager.getInstance().getFileTypeByFileName(vf.name)
         // git output is LF-normalized (core.autocrlf); match the working file's EOL so the diff doesn't
         // report "differences only in line separators".
@@ -576,7 +639,6 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
      *  so it runs off the EDT (the preview path already does, via the diff processor). */
     fun openDiffPinned(f: VFile) {
         val rel = f.rel
-        if (vfile(rel) == null) return openFile(rel)
         com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
             val req = try { buildDiffRequest(rel) } catch (e: Exception) { return@executeOnPooledThread }
             com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {

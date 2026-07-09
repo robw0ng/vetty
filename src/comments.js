@@ -63,6 +63,7 @@ async function persistComments(context) {
     });
   }
   await context.workspaceState.update(commentsKey(), map);
+  app.commentsTree?.refresh();
 }
 
 /** Find which line `anchor` is on now — the stored line if unchanged, else the nearest line that matches. */
@@ -287,6 +288,128 @@ function onBranchChanged(context) {
   commentThreads.length = 0;
   builtDocs.clear();
   for (const ed of vscode.window.visibleTextEditors) hydrateComments(context, ed.document);
+  app.commentsTree?.refresh();
+}
+
+// --- Comments view: sidebar list of this branch's comments (mirrors the Rider Comments section) ---
+
+class CommentsTree {
+  constructor(context) {
+    this.context = context;
+    this._emitter = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._emitter.event;
+  }
+  refresh() {
+    this._emitter.fire();
+    if (app.commentsTreeView) {
+      const map = getComments(this.context);
+      const n = Object.values(map).reduce((a, notes) => a + notes.length, 0);
+      app.commentsTreeView.description = n ? String(n) : '';
+    }
+  }
+  getTreeItem(el) {
+    return el;
+  }
+  getChildren(el) {
+    if (el) return [];
+    const map = getComments(this.context);
+    const items = [];
+    for (const rel of Object.keys(map)) {
+      (map[rel] || []).forEach((n, i) => {
+        const text = n.comments.join(' / ').replace(/\s+/g, ' ').trim();
+        const loc = lineRef(n.range[0], n.range[2], n.range[3]);
+        const it = new vscode.TreeItem(text || '(empty)');
+        it.description = `${path.basename(rel)}:${loc}`;
+        it.tooltip = `${rel}:${loc}\n\n${n.comments.join('\n\n')}`;
+        it.iconPath = new vscode.ThemeIcon('comment');
+        it.note = { rel, i }; // index into the stored per-file array, for edit/delete
+        it.contextValue = 'vettyComment';
+        it.command = { command: 'vetty.commentGoTo', title: 'Go to', arguments: [rel, n.range[0], n.anchor] };
+        items.push(it);
+      });
+    }
+    if (!items.length) {
+      const it = new vscode.TreeItem('No comments');
+      it.iconPath = new vscode.ThemeIcon('check');
+      return [it];
+    }
+    return items;
+  }
+}
+
+/** Jump to a comment's line in the working file (re-anchored by content, like opening the thread). */
+async function commentGoTo(rel, line, anchor) {
+  const cwd = getCwd();
+  if (!cwd) return;
+  const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(path.join(cwd, rel)));
+  const l = Math.min(relocateLine(doc, line, anchor), Math.max(doc.lineCount - 1, 0));
+  await vscode.window.showTextDocument(doc, { selection: new vscode.Range(l, 0, l, 0) });
+}
+
+/** Right-click "Go to" on a comment row (row click does the same; this covers the menu). */
+async function commentOpen(context, item) {
+  const note = item?.note;
+  if (!note) return;
+  const n = getComments(context)[note.rel]?.[note.i];
+  if (n) await commentGoTo(note.rel, n.range[0], n.anchor);
+}
+
+/** Notes ({rel, i}) from a comments-view action: multi-selection if present, else the clicked row. */
+function selectedNotes(item, sel) {
+  const items = Array.isArray(sel) && sel.length ? sel : item ? [item] : [];
+  return items.map((x) => x?.note).filter(Boolean);
+}
+
+/** Rewrite storage after a tree-side mutation, then rebuild live threads to match. */
+async function saveAndRebuild(context, map) {
+  await context.workspaceState.update(commentsKey(), map);
+  for (const t of commentThreads) t.dispose(); // rehydrate from storage so live threads can't resurrect old state
+  commentThreads.length = 0;
+  builtDocs.clear();
+  for (const ed of vscode.window.visibleTextEditors) hydrateComments(context, ed.document);
+  app.commentsTree?.refresh();
+  refreshTree();
+}
+
+async function commentDelete(context, item, sel) {
+  const notes = selectedNotes(item, sel);
+  if (!notes.length) return;
+  const map = getComments(context);
+  const drop = new Set(notes.map((n) => `${n.rel}\n${n.i}`));
+  const next = {};
+  for (const rel of Object.keys(map)) {
+    const kept = (map[rel] || []).filter((_, i) => !drop.has(`${rel}\n${i}`));
+    if (kept.length) next[rel] = kept;
+  }
+  await saveAndRebuild(context, next);
+}
+
+async function commentEdit(context, item) {
+  const note = item?.note;
+  if (!note) return;
+  const map = getComments(context);
+  const n = map[note.rel]?.[note.i];
+  if (!n) return;
+  const value = await vscode.window.showInputBox({ prompt: `Comment on ${note.rel}`, value: n.comments.join('\n\n') });
+  if (value === undefined) return; // Escape cancels
+  const next = { ...map, [note.rel]: map[note.rel].map((x, i) => (i === note.i ? { ...x, comments: [value] } : x)) };
+  await saveAndRebuild(context, next);
+}
+
+async function commentCopy(context, item, sel) {
+  const notes = selectedNotes(item, sel);
+  if (!notes.length) return;
+  const map = getComments(context);
+  const lines = notes
+    .map((note) => {
+      const n = map[note.rel]?.[note.i];
+      if (!n) return null;
+      const text = n.comments.join(' / ').replace(/\s+/g, ' ').trim();
+      return `- ${note.rel}:${lineRef(n.range[0], n.range[2], n.range[3])} — ${text}`; // same format as Export
+    })
+    .filter(Boolean);
+  await vscode.env.clipboard.writeText(lines.join('\n'));
+  vscode.window.setStatusBarMessage(`Copied ${lines.length} comment(s)`, 2000);
 }
 
 /** Register the comment controller + comment commands, and hydrate stored comments as editors open. */
@@ -511,4 +634,5 @@ async function submitReview(context) {
 module.exports = {
   initComments, onBranchChanged, updatePrTitle, togglePrMode,
   reviewPr, finishReview, pullPrComments, submitReview,
+  CommentsTree, commentGoTo, commentOpen, commentDelete, commentEdit, commentCopy,
 };

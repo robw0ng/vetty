@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.64",
+  "version": "0.0.71",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -132,12 +132,12 @@
       },
       {
         "command": "vetty.treeIgnore",
-        "title": "Untrack File",
+        "title": "Untrack",
         "icon": "$(circle-slash)"
       },
       {
         "command": "vetty.treeUnignore",
-        "title": "Track File",
+        "title": "Track",
         "icon": "$(check)"
       },
       {
@@ -270,6 +270,20 @@
         "category": "Vetty"
       },
       {
+        "command": "vetty.commentEdit",
+        "title": "Edit"
+      },
+      {
+        "command": "vetty.commentCopy",
+        "title": "Copy",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "vetty.commentDelete",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
         "command": "vetty.copyPaths",
         "title": "Copy Path(s)"
       },
@@ -355,6 +369,25 @@
       {
         "command": "vetty.cancelEditComment",
         "title": "Cancel"
+      },
+      {
+        "command": "vetty.commentOpen",
+        "title": "Go to"
+      },
+      {
+        "command": "vetty.todoOpenItem",
+        "title": "Go to"
+      },
+      {
+        "command": "vetty.todoCopyItems",
+        "title": "Copy",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "vetty.exportTodos",
+        "title": "Export TODOs to Clipboard",
+        "category": "Vetty",
+        "icon": "$(copy)"
       }
     ],
     "viewsContainers": {
@@ -380,6 +413,10 @@
         {
           "id": "vettyTodos",
           "name": "Todos"
+        },
+        {
+          "id": "vettyComments",
+          "name": "Comments"
         }
       ]
     },
@@ -409,6 +446,16 @@
         }
       ],
       "view/title": [
+        {
+          "command": "vetty.exportComments",
+          "when": "view == vettyComments",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vetty.clearComments",
+          "when": "view == vettyComments",
+          "group": "navigation@2"
+        },
         {
           "command": "vetty.reviewPr",
           "when": "view == vettyView && vetty.prMode && !vetty.reviewing",
@@ -495,19 +542,14 @@
           "group": "3_git@2"
         },
         {
-          "command": "vetty.exportComments",
-          "when": "view == vettyView",
-          "group": "1_comments@1"
-        },
-        {
           "command": "vetty.pullPrComments",
-          "when": "view == vettyView && vetty.prMode",
-          "group": "1_comments@2"
+          "when": "view == vettyComments && vetty.prMode",
+          "group": "navigation@3"
         },
         {
-          "command": "vetty.clearComments",
-          "when": "view == vettyView",
-          "group": "1_comments@3"
+          "command": "vetty.exportTodos",
+          "when": "view == vettyTodos",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -530,11 +572,6 @@
           "command": "vetty.stageViewed",
           "when": "view == vettyView && viewItem == group-viewed",
           "group": "inline@2"
-        },
-        {
-          "command": "vetty.treeIgnore",
-          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
-          "group": "inline@1"
         },
         {
           "command": "vetty.treeUnignore",
@@ -562,49 +599,94 @@
           "group": "inline@4"
         },
         {
-          "command": "vetty.stageFile",
-          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
-          "group": "navigation@5"
-        },
-        {
-          "command": "vetty.treeOpenDiff",
-          "when": "view == vettyView && viewItem =~ /^file-/",
-          "group": "navigation@1"
-        },
-        {
-          "command": "vetty.treeOpenFile",
-          "when": "view == vettyView && viewItem =~ /^file-/",
-          "group": "navigation@2"
-        },
-        {
           "command": "vetty.treeView",
           "when": "view == vettyView && viewItem == file-unviewed",
-          "group": "navigation@0"
+          "group": "1_review@1"
         },
         {
           "command": "vetty.treeUnview",
           "when": "view == vettyView && viewItem == file-viewed",
-          "group": "navigation@0"
+          "group": "1_review@1"
+        },
+        {
+          "command": "vetty.treeOpenDiff",
+          "when": "view == vettyView && viewItem =~ /^file-/",
+          "group": "1_review@2"
+        },
+        {
+          "command": "vetty.treeOpenFile",
+          "when": "view == vettyView && viewItem =~ /^file-/",
+          "group": "1_review@3"
         },
         {
           "command": "vetty.treeIgnore",
           "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
-          "group": "navigation@4"
+          "group": "2_manage@9"
         },
         {
           "command": "vetty.treeUnignore",
           "when": "view == vettyView && viewItem == file-ignored",
-          "group": "navigation@4"
+          "group": "2_manage@9"
+        },
+        {
+          "command": "vetty.stageFile",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "2_manage@2"
         },
         {
           "command": "vetty.addToGroup",
-          "when": "view == vettyView && viewItem =~ /^file-/",
-          "group": "navigation@6"
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "2_manage@3"
         },
         {
           "command": "vetty.removeFromGroup",
-          "when": "view == vettyView && viewItem =~ /^file-/",
-          "group": "navigation@7"
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "group": "2_manage@4"
+        },
+        {
+          "command": "vetty.commentDelete",
+          "when": "view == vettyComments && viewItem == vettyComment",
+          "group": "inline@1"
+        },
+        {
+          "command": "vetty.commentEdit",
+          "when": "view == vettyComments && viewItem == vettyComment",
+          "group": "1_comment@1"
+        },
+        {
+          "command": "vetty.commentCopy",
+          "when": "view == vettyComments && viewItem == vettyComment",
+          "group": "1_comment@2"
+        },
+        {
+          "command": "vetty.commentDelete",
+          "when": "view == vettyComments && viewItem == vettyComment",
+          "group": "1_comment@3"
+        },
+        {
+          "command": "vetty.commentCopy",
+          "when": "view == vettyComments && viewItem == vettyComment",
+          "group": "inline@0"
+        },
+        {
+          "command": "vetty.commentOpen",
+          "when": "view == vettyComments && viewItem == vettyComment",
+          "group": "1_comment@0"
+        },
+        {
+          "command": "vetty.todoCopyItems",
+          "when": "view == vettyTodos && viewItem == vettyTodo",
+          "group": "inline@0"
+        },
+        {
+          "command": "vetty.todoOpenItem",
+          "when": "view == vettyTodos && viewItem == vettyTodo",
+          "group": "1_todo@0"
+        },
+        {
+          "command": "vetty.todoCopyItems",
+          "when": "view == vettyTodos && viewItem == vettyTodo",
+          "group": "1_todo@1"
         }
       ],
       "comments/commentThread/context": [
@@ -646,6 +728,30 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "vetty.todoOpenItem",
+          "when": "false"
+        },
+        {
+          "command": "vetty.todoCopyItems",
+          "when": "false"
+        },
+        {
+          "command": "vetty.commentOpen",
+          "when": "false"
+        },
+        {
+          "command": "vetty.commentEdit",
+          "when": "false"
+        },
+        {
+          "command": "vetty.commentCopy",
+          "when": "false"
+        },
+        {
+          "command": "vetty.commentDelete",
+          "when": "false"
+        },
         {
           "command": "vetty.markViewed",
           "when": "false"
