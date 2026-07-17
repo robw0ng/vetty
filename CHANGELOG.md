@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.75
+
+- VS Code: the **Viewed group defaults to expanded** on reload (Unviewed already did; Untracked
+  stays collapsed). Rider already behaved this way.
+
 ## 0.0.72
 
 - **Deletions are reviewable.** Files removed by the branch show as red `D` rows with `−N` counts and
