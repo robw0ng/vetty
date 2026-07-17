@@ -11,7 +11,7 @@ const {
   MAX_REL_BRANCHES, PARENT_MAX_AHEAD, MAX_OPEN_WITHOUT_CONFIRM, FOLDER_KEY,
   workspaceFolderPath, resolveRepoRoot, watchGitDir, detectGh, hashCache, baseUriFor,
 } = core;
-const { openOneDiff, openReviewFile, openNextUnviewed } = require('./tree');
+const { openOneDiff, openReviewFile } = require('./tree');
 
 /** Multi-root: pick which workspace folder Vetty reviews. Remembered per workspace. */
 async function pickFolder(context) {
@@ -260,12 +260,8 @@ async function applyViewed(context, makeViewed) {
   updateViewedContext(context);
   refreshTree();
   vscode.window.setStatusBarMessage(`${next ? 'Marked viewed' : 'Unmarked'} (vs ${base}): ${rel}`, 2500);
-  // Auto-advance to the next unviewed file — matches the tree-row View action, so the diff-viewer's
-  // title "View" button walks the review. Only when this file is actually part of the current review
-  // (in the tree's shown set); marking viewed on some unrelated editor shouldn't yank you into it.
-  if (next && base === app.diffTree?.base && app.diffTree.visibleFiles(cwd).includes(rel)) {
-    await openNextUnviewed(context, base, cwd, rel);
-  }
+  // No auto-advance anywhere: marking viewed never yanks you to another file; j/k or click to proceed.
+  if (base === app.diffTree?.base) app.diffTree.revealFile(rel);
 }
 
 async function clearViewed(context) {
@@ -340,8 +336,8 @@ async function treeSetViewed(context, item, sel, makeViewed) {
   await setViewed(context, base, viewed);
   updateViewedContext(context);
   refreshTree();
-  // Auto-advance: marking a single file viewed opens the next unviewed one.
-  if (makeViewed && rels.length === 1) await openNextUnviewed(context, base, cwd, rels[0]);
+  // No auto-advance: the row stays selected in its new group (like staging); j/k or click to proceed.
+  if (rels.length === 1) app.diffTree.revealFile(rels[0]);
 }
 
 /** Bridge review → SCM: git-add every file you've marked viewed, then commit in Source Control. */

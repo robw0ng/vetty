@@ -506,17 +506,6 @@ async function openReviewFile(context, cwd, base, rel, opts = { preview: true })
   }
 }
 
-/** After a file is marked viewed, open the next still-unviewed changed file (diff or file). */
-async function openNextUnviewed(context, base, cwd, justViewed) {
-  const viewed = getViewed(context, base);
-  const order = app.diffTree.visibleFiles(cwd); // stay within the filtered slice (group/scope/search/name)
-  const start = order.indexOf(justViewed);
-  const next = order.slice(start + 1).concat(order.slice(0, start + 1)).find((f) => !isViewed(cwd, viewed, f));
-  if (!next) return; // all viewed
-  await openReviewFile(context, cwd, base, next);
-  app.diffTree.revealFile(next); // highlight it in the list
-}
-
 /** j/k navigation: open the next/prev unviewed file relative to the active one. */
 async function navigateUnviewed(context, dir) {
   const cwd = getCwd();
@@ -608,7 +597,7 @@ async function toggleSinceReview(context) {
 module.exports = {
   DiffTree, TodoTree, fileDecorations,
   copyTodos, openTodo, openMatch, todoOpenItem, todoCopyItems, exportTodos,
-  openOneDiff, openReviewFile, openNextUnviewed, navigateUnviewed,
+  openOneDiff, openReviewFile, navigateUnviewed,
   expandAll, collapseFolders, showMore,
   toggleNesting, toggleWhitespace, toggleRange, toggleSinceReview,
 };

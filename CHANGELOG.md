@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.77
+
+- **No auto-advance on mark-viewed** — anywhere (tree actions, `v` key, diff-viewer View button).
+  The row stays selected in its new group, like staging. Explicit navigation (`j`/`k`,
+  Next/Prev Unviewed) unchanged. Both editors.
+
 ## 0.0.75
 
 - VS Code: the **Viewed group defaults to expanded** on reload (Unviewed already did; Untracked

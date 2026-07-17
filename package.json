@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.75",
+  "version": "0.0.76",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",

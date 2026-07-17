@@ -169,8 +169,8 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     /** Run [work] (spawns git) off the EDT, then reload. Rider 2026+ hard-errors on synchronous
      *  process execution on the EDT — every mutating action must route through here. */
-    private fun offEdt(work: () -> Unit) {
-        ApplicationManager.getApplication().executeOnPooledThread { work(); reload() }
+    private fun offEdt(after: (() -> Unit)? = null, work: () -> Unit) {
+        ApplicationManager.getApplication().executeOnPooledThread { work(); reload(after) }
     }
 
     /** Inline row buttons: view/unview (check=View, X=Unview) or Track for noise rows, + Open File.
@@ -179,7 +179,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         if (vf.group != Group.UNTRACKED) {
             val viewed = vf.group == Group.VIEWED
             val icon = if (viewed) AllIcons.Actions.Cancel else AllIcons.Actions.Checked
-            add(Triple(icon, if (viewed) "Unview" else "View") { offEdt { svc.toggleViewed(vf.rel) } })
+            add(Triple(icon, if (viewed) "Unview" else "View") { offEdt(after = { select(vf.rel) }) { svc.toggleViewed(vf.rel) } })
         } else {
             add(Triple(AllIcons.General.Add, "Track") { offEdt { svc.track(vf.rel) } })
         }
@@ -695,26 +695,15 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private fun activeFile(): VFile? =
         (tree.lastSelectedPathComponent as? DefaultMutableTreeNode)?.userObject as? VFile
 
-    /** Toggle viewed on the selection; if a single file was just marked viewed, auto-advance like VS Code. */
+    /** Toggle viewed on the selection; the row stays selected in its new group (no auto-advance). */
     private fun toggleViewedSelected() {
         val sel = selectedFiles()
         if (sel.isEmpty()) return
         // Git work (isViewed fallback + hash-object) must stay off the EDT (Rider 2026+ hard-errors).
         ApplicationManager.getApplication().executeOnPooledThread {
-            val advanceFrom = if (sel.size == 1 && !svc.isViewed(sel[0].rel)) sel[0].rel else null
             sel.forEach { svc.toggleViewed(it.rel) }
-            // reload is async — advance only after the rebuilt `current` reflects the new groups.
-            reload { advanceFrom?.let { advanceToNextUnviewed(it) } }
+            reload { if (sel.size == 1) select(sel[0].rel) }
         }
-    }
-
-    /** Select + preview the next still-unviewed file after `fromRel` (wraps around). */
-    private fun advanceToNextUnviewed(fromRel: String) {
-        val order = current.map { it.rel }
-        val start = order.indexOf(fromRel).coerceAtLeast(0)
-        val rotated = order.drop(start + 1) + order.take(start + 1)
-        val next = rotated.map { r -> current.first { it.rel == r } }.firstOrNull { it.group == Group.UNVIEWED }
-        next?.let { select(it.rel); openRow(it) }
     }
 
     /** Open a row in the shared diff preview (single surface for added + modified). */
