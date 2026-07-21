@@ -22,10 +22,13 @@ New "Stack" section in the Vetty container. Detailed phases:
    stored graph is truth). Render trunk-at-bottom list, current highlighted, `↑ahead` +
    `needs restack` badges (parent tip ≠ recorded sha), PR numbers via `gh`. Click = checkout
    (dirty-tree guard). `Stack: Up/Down` commands + keybindings.
-2. **Restack engine**: `git rebase --onto <newParentTip> <recordedParentTip> <child>`, cascade over
-   descendants, pause on conflict (detect `.git/rebase-merge`), panel buttons for continue/abort,
-   resume cascade, auto-stash around the whole op. *This is 80% of the difficulty — design the
-   pause/resume state first.*
+2. **Restack (orchestrate git, don't build an engine)**: prefer native `git rebase --update-refs`
+   (git 2.38+) — rebasing the top branch moves every intermediate ref, one command for the common
+   trunk-sync case. The only orchestration we own: (a) recorded `parentTipSha` so the amend-mid-stack
+   case uses `git rebase --onto <newTip> <recordedOldTip> <child> --update-refs` (plain rebase
+   mis-forks and replays stale commits there), (b) conflict surfacing — detect `.git/rebase-merge`,
+   panel buttons for continue/abort, resume, (c) auto-stash around the op. Zero rebase logic of our
+   own; conflicts UX is still the hard part.
 3. **Lifecycle**: create-on-top, insert between levels, fold into parent, delete + re-parent
    children (+ cascade restack).
 4. **Remote**: sync trunk → cascade restack → prune merged (GC hooks exist). Push stack with

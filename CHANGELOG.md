@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.79
+
+- **Untracked (new) files show `+N` line counts** — git's numstat can't cover untracked files, so
+  Vetty counts them itself, cached by (mtime, size) so refreshes don't re-read anything. Huge (>1MB)
+  and binary files show no count. Both editors.
+
 ## 0.0.77
 
 - **No auto-advance on mark-viewed** — anywhere (tree actions, `v` key, diff-viewer View button).

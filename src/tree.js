@@ -1,6 +1,7 @@
 // The Activity Bar views: DiffTree (changed files, Unviewed/Viewed/Untracked), TodoTree, file
 // decorations, and the open/navigate/toggle behaviors that belong to them.
 const vscode = require('vscode');
+const fs = require('fs');
 const path = require('path');
 const { parseNumstat } = require('../lib');
 const core = require('./core');
@@ -11,6 +12,32 @@ const {
 } = core;
 
 const PAGE_SIZE = 500; // flat-view rows per group before a "Show more" row appears
+
+// Line counts for untracked files, cached by (mtime, size) — refreshes fire every ~400ms, so
+// without the cache every untracked file would be re-read on each one. null = huge/binary/unreadable.
+const lineCountCache = new Map(); // rel → { key: 'mtimeMs:size', n }
+function untrackedLineCount(cwd, rel) {
+  try {
+    const p = path.join(cwd, rel);
+    const st = fs.statSync(p);
+    const key = `${st.mtimeMs}:${st.size}`;
+    const c = lineCountCache.get(rel);
+    if (c && c.key === key) return c.n;
+    let n = null;
+    if (st.size <= 1024 * 1024) {
+      const buf = fs.readFileSync(p);
+      if (!buf.includes(0)) {
+        n = 0;
+        for (let i = 0; i < buf.length; i++) if (buf[i] === 10) n++;
+        if (buf.length && buf[buf.length - 1] !== 10) n++; // last line without trailing newline
+      }
+    }
+    lineCountCache.set(rel, { key, n });
+    return n;
+  } catch {
+    return null; // unreadable — no counts
+  }
+}
 
 // Git-style badge + color on each changed file, reusing VS Code's built-in gitDecoration colors.
 const STATUS_COLOR = {
@@ -155,6 +182,10 @@ class DiffTree {
           files.push(rel);
           status.set(rel, 'U');
           added.add(rel); // no base version → open as file, not diff
+          // Untracked files never appear in `git diff --numstat` — count their lines ourselves so
+          // new files get a `+N` triage signal too. Skipped for huge/binary files.
+          const n = untrackedLineCount(cwd, rel);
+          if (n !== null) stat.set(rel, { add: n, del: 0 });
         }
         for (const r of cachedOut.split('\n')) {
           const rel = r.trim();

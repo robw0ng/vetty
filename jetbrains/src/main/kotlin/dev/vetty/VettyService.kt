@@ -361,9 +361,31 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         // Git-untracked NEW files are regular changes (status "U"); only user-untracked files go to Untracked.
         for (rel in untrackedList) {
             if (rel in seen) continue
-            files.add(VFile(rel, "U", 0, 0, groupFor(rel)))
+            files.add(VFile(rel, "U", untrackedLineCount(rel), 0, groupFor(rel)))
         }
         return files.sortedBy { it.rel }
+    }
+
+    // Line counts for untracked files (absent from `git diff --numstat`), cached by (mtime, size) so
+    // refreshes don't re-read every untracked file. 0 = huge/binary/unreadable (renderer hides 0/0).
+    private val lineCountCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Int>>()
+    private fun untrackedLineCount(rel: String): Int {
+        val root = repoRoot() ?: return 0
+        return try {
+            val f = java.io.File(root, rel)
+            val stamp = f.lastModified() xor f.length()
+            lineCountCache[rel]?.let { (s, n) -> if (s == stamp) return n }
+            var n = 0
+            if (f.length() in 1..(1024 * 1024)) {
+                val b = f.readBytes()
+                if (!b.contains(0)) {
+                    n = b.count { it == '\n'.code.toByte() }
+                    if (b.last() != '\n'.code.toByte()) n++   // last line without trailing newline
+                }
+            }
+            lineCountCache[rel] = stamp to n
+            n
+        } catch (e: Exception) { 0 }
     }
 
     fun groupFor(rel: String): Group = when {
