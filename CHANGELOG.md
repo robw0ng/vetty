@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.0.87
+
+- **Stage-on-view mode** (opt-in: `vetty.stageOnView` / Rider toolbar toggle) — viewed = approved =
+  staged. View stages, unview unstages, buttons read **View & Stage / Unview & Unstage**. Staging
+  outside Vetty (Source Control / commit pane) counts as a view; format-on-commit hooks
+  (lint-staged etc.) no longer unview — a marked file that's clean vs HEAD self-heals its mark.
+- **Comments = request changes** (stage-on-view): viewing a commented file never stages it;
+  commenting on a viewed file unstages it; deleting a file's last comment drops it back to
+  Unviewed so the next view is the approval. Both editors.
+- **Revert actions**: full **Revert Changes** (restore to HEAD, untracked deleted) and
+  **Revert to Last Viewed** (restore the review snapshot — flips straight back to Viewed, index
+  kept in sync). One state-appropriate inline button per row; both in the right-click menu, which
+  is reorganized (review → manage → revert → track). Both editors.
+- **Ignore patterns**: globs that send matches to Untracked on every branch — a review-noise layer
+  on top of .gitignore, no repo file. `vetty.ignorePatterns` setting / Rider toolbar dialog.
+  `**` crosses folders; `*`/`?` don't.
+- **Alt+Shift+C** adds a comment on the caret line in any editor/diff (VS Code keybinding; Rider
+  already had it).
+- **Debug log** (`vetty.debug` / `#dev.vetty`): git spawn timings, watcher-triggered reloads, load
+  stats — for churn hunting.
+- **Fix**: TODOs in paths containing spaces (git's trailing-tab diff headers) now detected.
+
 ## 0.0.79
 
 - **Untracked (new) files show `+N` line counts** — git's numstat can't cover untracked files, so

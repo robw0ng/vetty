@@ -15,6 +15,7 @@ const cmds = require('./src/commands');
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
   app.context = context;
+  core.updateDebugFlag();
   app.diffTree = new tree.DiffTree(context);
   app.todoTree = new tree.TodoTree(context);
   context.subscriptions.push(
@@ -54,6 +55,9 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.treeOpenDiff', (item, sel) => cmds.treeOpenDiff(item, sel)),
     vscode.commands.registerCommand('vetty.treeView', (item, sel) => cmds.treeSetViewed(context, item, sel, true)),
     vscode.commands.registerCommand('vetty.treeUnview', (item, sel) => cmds.treeSetViewed(context, item, sel, false)),
+    // Same handlers, stage-on-view titles ("View & Stage") — menus swap on config.vetty.stageOnView.
+    vscode.commands.registerCommand('vetty.treeViewStage', (item, sel) => cmds.treeSetViewed(context, item, sel, true)),
+    vscode.commands.registerCommand('vetty.treeUnviewStage', (item, sel) => cmds.treeSetViewed(context, item, sel, false)),
     vscode.commands.registerCommand('vetty.treeIgnore', (item, sel) => cmds.treeSetIgnored(context, item, sel, true)),
     vscode.commands.registerCommand('vetty.treeUnignore', (item, sel) => cmds.treeSetIgnored(context, item, sel, false)),
     vscode.commands.registerCommand('vetty.viewAsTree', () => tree.toggleNesting(context)),
@@ -87,7 +91,16 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.expandAll', () => tree.expandAll()),
     vscode.commands.registerCommand('vetty.hideWhitespace', () => tree.toggleWhitespace(context)),
     vscode.commands.registerCommand('vetty.showWhitespace', () => tree.toggleWhitespace(context)),
+    vscode.commands.registerCommand('vetty.revertFile', (item, sel) => cmds.revertFiles(context, item, sel)),
+    vscode.commands.registerCommand('vetty.revertToViewed', (item, sel) => cmds.revertToViewed(context, item, sel)),
+    vscode.commands.registerCommand('vetty.toggleStageOnView', () => cmds.toggleStageOnView()),
+    vscode.commands.registerCommand('vetty.showDebugLog', () => core.showDebugLog()),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
+      if (e.affectsConfiguration('vetty.debug')) core.updateDebugFlag();
+      if (e.affectsConfiguration('vetty.ignorePatterns')) {
+        core.resetIgnorePatterns();
+        app.diffTree.load(); // regroup with the new patterns
+      }
       if (!e.affectsConfiguration('vetty.pullRequests.enabled')) return;
       await core.updatePrMode();
       // Disabling mid-review → clean up the checkout so the user isn't stranded on the PR branch.
@@ -122,7 +135,8 @@ function activate(context) {
     const cwd = core.getCwd();
     if (cwd) {
       let timer = null;
-      app.bumpReload = () => {
+      app.bumpReload = (uri) => {
+        if (uri) core.dbg(`watch → reload: ${uri.fsPath ?? uri}`); // churn attribution
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => app.diffTree.load(), 400); // load() re-resolves the base (handles branch switches)
       };

@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.79",
+  "version": "0.0.86",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -128,6 +128,16 @@
       {
         "command": "vetty.treeUnview",
         "title": "Unview",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "vetty.treeViewStage",
+        "title": "View & Stage",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "vetty.treeUnviewStage",
+        "title": "Unview & Unstage",
         "icon": "$(eye-closed)"
       },
       {
@@ -388,6 +398,26 @@
         "title": "Export TODOs to Clipboard",
         "category": "Vetty",
         "icon": "$(copy)"
+      },
+      {
+        "command": "vetty.showDebugLog",
+        "title": "Show Debug Log",
+        "category": "Vetty"
+      },
+      {
+        "command": "vetty.toggleStageOnView",
+        "title": "Toggle Stage on View",
+        "category": "Vetty"
+      },
+      {
+        "command": "vetty.revertFile",
+        "title": "Revert Changes",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "vetty.revertToViewed",
+        "title": "Revert to Last Viewed",
+        "icon": "$(history)"
       }
     ],
     "viewsContainers": {
@@ -585,27 +615,47 @@
         },
         {
           "command": "vetty.treeView",
-          "when": "view == vettyView && viewItem == file-unviewed",
+          "when": "view == vettyView && viewItem =~ /^file-unviewed/ && !config.vetty.stageOnView",
+          "group": "inline@3"
+        },
+        {
+          "command": "vetty.treeViewStage",
+          "when": "view == vettyView && viewItem =~ /^file-unviewed/ && config.vetty.stageOnView",
           "group": "inline@3"
         },
         {
           "command": "vetty.treeUnview",
-          "when": "view == vettyView && viewItem == file-viewed",
+          "when": "view == vettyView && viewItem =~ /^file-viewed/ && !config.vetty.stageOnView",
+          "group": "inline@3"
+        },
+        {
+          "command": "vetty.treeUnviewStage",
+          "when": "view == vettyView && viewItem =~ /^file-viewed/ && config.vetty.stageOnView",
           "group": "inline@3"
         },
         {
           "command": "vetty.stageFile",
-          "when": "view == vettyView && viewItem == file-viewed",
+          "when": "view == vettyView && viewItem =~ /^file-viewed/ && !config.vetty.stageOnView",
           "group": "inline@4"
         },
         {
           "command": "vetty.treeView",
-          "when": "view == vettyView && viewItem == file-unviewed",
+          "when": "view == vettyView && viewItem =~ /^file-unviewed/ && !config.vetty.stageOnView",
+          "group": "1_review@1"
+        },
+        {
+          "command": "vetty.treeViewStage",
+          "when": "view == vettyView && viewItem =~ /^file-unviewed/ && config.vetty.stageOnView",
           "group": "1_review@1"
         },
         {
           "command": "vetty.treeUnview",
-          "when": "view == vettyView && viewItem == file-viewed",
+          "when": "view == vettyView && viewItem =~ /^file-viewed/ && !config.vetty.stageOnView",
+          "group": "1_review@1"
+        },
+        {
+          "command": "vetty.treeUnviewStage",
+          "when": "view == vettyView && viewItem =~ /^file-viewed/ && config.vetty.stageOnView",
           "group": "1_review@1"
         },
         {
@@ -620,27 +670,27 @@
         },
         {
           "command": "vetty.treeIgnore",
-          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
-          "group": "2_manage@9"
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
+          "group": "4_track@1"
         },
         {
           "command": "vetty.treeUnignore",
           "when": "view == vettyView && viewItem == file-ignored",
-          "group": "2_manage@9"
+          "group": "4_track@1"
         },
         {
           "command": "vetty.stageFile",
-          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
           "group": "2_manage@2"
         },
         {
           "command": "vetty.addToGroup",
-          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
           "group": "2_manage@3"
         },
         {
           "command": "vetty.removeFromGroup",
-          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)$/",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
           "group": "2_manage@4"
         },
         {
@@ -687,6 +737,31 @@
           "command": "vetty.todoCopyItems",
           "when": "view == vettyTodos && viewItem == vettyTodo",
           "group": "1_todo@1"
+        },
+        {
+          "command": "vetty.revertFile",
+          "when": "view == vettyView && viewItem =~ /^file-viewed/",
+          "group": "inline@1"
+        },
+        {
+          "command": "vetty.revertFile",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
+          "group": "3_revert@2"
+        },
+        {
+          "command": "vetty.revertToViewed",
+          "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
+          "group": "3_revert@1"
+        },
+        {
+          "command": "vetty.revertToViewed",
+          "when": "view == vettyView && viewItem == file-unviewed-snap",
+          "group": "inline@1"
+        },
+        {
+          "command": "vetty.revertFile",
+          "when": "view == vettyView && viewItem == file-unviewed",
+          "group": "inline@1"
         }
       ],
       "comments/commentThread/context": [
@@ -728,6 +803,14 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "vetty.revertToViewed",
+          "when": "false"
+        },
+        {
+          "command": "vetty.revertFile",
+          "when": "false"
+        },
         {
           "command": "vetty.todoOpenItem",
           "when": "false"
@@ -887,10 +970,23 @@
         {
           "command": "vetty.prevUnviewed",
           "when": "false"
+        },
+        {
+          "command": "vetty.treeViewStage",
+          "when": "false"
+        },
+        {
+          "command": "vetty.treeUnviewStage",
+          "when": "false"
         }
       ]
     },
     "keybindings": [
+      {
+        "command": "workbench.action.addComment",
+        "key": "alt+shift+c",
+        "when": "editorTextFocus"
+      },
       {
         "command": "vetty.copyPaths",
         "key": "ctrl+c",
@@ -926,6 +1022,24 @@
           "type": "boolean",
           "default": false,
           "description": "Experimental: enable GitHub pull request review (checkout PRs, see/submit reviews). Off by default. Requires the GitHub CLI `gh`."
+        },
+        "vetty.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log git spawns, watcher-triggered refreshes, and load timings to the \"Vetty Debug\" output channel (churn hunting)."
+        },
+        "vetty.stageOnView": {
+          "type": "boolean",
+          "default": false,
+          "description": "Marking a file viewed also stages it (git add) — reviewed means staged. Unviewing unstages; files with open comments are never auto-staged."
+        },
+        "vetty.ignorePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Glob patterns whose matches go to the Untracked group — a review-noise layer on top of .gitignore (e.g. \"*.g.cs\", \"**/migrations/**\", \"package-lock.json\"). `**` crosses folders; a pattern containing `/` matches the repo-relative path, otherwise any path segment."
         }
       }
     }

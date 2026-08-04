@@ -7,7 +7,7 @@ const path = require('path');
 const { lineRef } = require('../lib');
 const {
   app, refreshTree, getCwd, git, gh, ghAvailable, prEnabled, REVIEW_KEY, setBaseFor, updateViewedContext,
-  stateScope,
+  stateScope, getViewed, setViewed, isViewed, unstageOnUnview,
 } = require('./core');
 
 // --- Local review comments: PR-style inline comment threads, persisted in workspaceState ---
@@ -27,6 +27,39 @@ const prShownKeys = new Set(); // comment ids already rendered — additive pull
 
 function getComments(context) {
   return context.workspaceState.get(commentsKey()) || {};
+}
+
+/** Comments = request changes (stage-on-view mode): commenting on a viewed file unstages it.
+ *  Deleting/resolving comments never auto-stages — staging comes back only via an explicit
+ *  (re-)view, and stageOnView itself skips files that still have open comments. */
+async function unstageForComment(context, rel) {
+  if (!rel || !vscode.workspace.getConfiguration('vetty').get('stageOnView', false)) return;
+  const cwd = getCwd();
+  const base = app.diffTree?.base;
+  if (!cwd || !base) return;
+  if (!isViewed(cwd, getViewed(context, base), rel)) return;
+  try {
+    await git(cwd, ['restore', '--staged', '--', rel]);
+  } catch { /* best-effort */ }
+  refreshTree();
+}
+
+/** Stage-on-view mode: resolving a file's LAST comment re-opens the verdict — the file returns to
+ *  Unviewed, so the next explicit view is the approval that stages it. */
+async function unviewOnCommentResolve(context, rels) {
+  if (!vscode.workspace.getConfiguration('vetty').get('stageOnView', false)) return;
+  const cwd = getCwd();
+  const base = app.diffTree?.base;
+  if (!cwd || !base) return;
+  const map = getComments(context);
+  const viewed = getViewed(context, base);
+  const drop = [...new Set(rels)].filter((r) => r && !(map[r] || []).length && viewed[r] !== undefined);
+  if (!drop.length) return;
+  for (const rel of drop) delete viewed[rel];
+  await setViewed(context, base, viewed);
+  await unstageOnUnview(cwd, drop); // usually already unstaged — keeps unview ⇒ unstage symmetric
+  updateViewedContext(context);
+  refreshTree();
 }
 function relOf(cwd, uri) {
   if (uri.scheme !== 'file') return null;
@@ -184,6 +217,7 @@ async function createComment(context, reply) {
   thread.collapsibleState = vscode.CommentThreadCollapsibleState.Expanded;
   if (!commentThreads.includes(thread)) commentThreads.push(thread);
   await persistComments(context);
+  await unstageForComment(context, thread.dbRel);
 }
 
 /** Copy all comments (local + pulled PR) as a paste-ready task list (file:line — comment). */
@@ -212,10 +246,13 @@ async function exportComments(context) {
 }
 
 async function deleteComment(context, thread) {
+  const cwd = getCwd();
+  const rel = thread.dbRel || (cwd && relOf(cwd, thread.uri));
   const i = commentThreads.indexOf(thread);
   if (i >= 0) commentThreads.splice(i, 1);
   thread.dispose();
   await persistComments(context);
+  await unviewOnCommentResolve(context, [rel]);
 }
 
 /** Reassign a thread's comments array so VS Code re-renders it after a mode/body change. */
@@ -272,10 +309,12 @@ async function clearAllComments(context) {
     'Clear all'
   );
   if (ok !== 'Clear all') return;
+  const rels = Object.keys(getComments(context)); // resolved files drop back to Unviewed below
   for (const t of commentThreads) t.dispose();
   commentThreads.length = 0;
   await context.workspaceState.update(commentsKey(), {});
   clearPrThreads(); // pulled PR comments cleared too
+  await unviewOnCommentResolve(context, rels);
   refreshTree(); // update the comment-count badge
   vscode.window.showInformationMessage('Cleared all comments.');
 }
@@ -382,6 +421,7 @@ async function commentDelete(context, item, sel) {
     if (kept.length) next[rel] = kept;
   }
   await saveAndRebuild(context, next);
+  await unviewOnCommentResolve(context, notes.map((n) => n.rel));
 }
 
 async function commentEdit(context, item) {
@@ -632,7 +672,7 @@ async function submitReview(context) {
 }
 
 module.exports = {
-  initComments, onBranchChanged, updatePrTitle, togglePrMode,
+  initComments, onBranchChanged, updatePrTitle, togglePrMode, getComments,
   reviewPr, finishReview, pullPrComments, submitReview,
   CommentsTree, commentGoTo, commentOpen, commentDelete, commentEdit, commentCopy,
 };

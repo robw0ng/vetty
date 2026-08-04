@@ -72,10 +72,30 @@ function watchGitDir(context, bump) {
   context.subscriptions.push(gitWatcher);
 }
 
+// Debug log (churn hunting): opt-in via the vetty.debug setting → "Vetty Debug" output channel.
+// Logs every git spawn + duration, watcher-triggered refreshes with the file that caused them,
+// and per-load summaries.
+let debugOn = false;
+let debugChannel = null;
+function updateDebugFlag() {
+  debugOn = vscode.workspace.getConfiguration('vetty').get('debug', false);
+}
+function dbg(msg) {
+  if (!debugOn) return;
+  if (!debugChannel) debugChannel = vscode.window.createOutputChannel('Vetty Debug');
+  debugChannel.appendLine(`${new Date().toISOString().slice(11, 23)} ${msg}`);
+}
+function showDebugLog() {
+  if (!debugChannel) debugChannel = vscode.window.createOutputChannel('Vetty Debug');
+  debugChannel.show(true);
+}
+
 /** Async git — non-blocking, so the extension host stays responsive. */
 async function git(cwd, args) {
+  const t0 = debugOn ? Date.now() : 0;
   // core.quotePath=false → non-ASCII paths come out raw (not octal-escaped), so path joins resolve.
   const { stdout } = await execFileAsync('git', ['-c', 'core.quotePath=false', ...args], { cwd, maxBuffer: 16 * 1024 * 1024 });
+  if (debugOn) dbg(`git ${args.slice(0, 4).join(' ')}${args.length > 4 ? ' …' : ''} — ${Date.now() - t0}ms`);
   return stdout;
 }
 
@@ -92,9 +112,37 @@ function gitStdin(cwd, args, input) {
   });
 }
 
+/** Raw bytes of a git blob (binary-safe — string stdout would corrupt binaries). */
+function gitBlobBytes(cwd, sha) {
+  return new Promise((resolve, reject) => {
+    cp.execFile(
+      'git',
+      ['cat-file', 'blob', sha],
+      { cwd, encoding: 'buffer', maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout) => (err ? reject(err) : resolve(stdout))
+    );
+  });
+}
+
 /** `git add` in chunks — thousands of paths in one argv can blow Windows' command-line length limit. */
 async function gitAddChunked(cwd, files) {
   for (let i = 0; i < files.length; i += 100) await git(cwd, ['add', '--', ...files.slice(i, i + 100)]);
+}
+
+/** Opt-in (vetty.stageOnView): marking a file viewed also stages its current content — reviewed ⇒
+ *  staged. Files with open comments are skipped: a comment means "changes requested", so the file
+ *  is reviewed but not approved (staged = viewed ∧ no open comments). Best-effort; never blocks
+ *  the mark. */
+async function stageOnView(context, cwd, rels) {
+  if (!vscode.workspace.getConfiguration('vetty').get('stageOnView', false)) return;
+  const comments = require('./comments').getComments(context); // lazy — comments requires core at top level
+  const approved = rels.filter((r) => !(comments[r] || []).length);
+  if (!approved.length) return;
+  try {
+    await gitAddChunked(cwd, approved); // also stages deletions for tombstoned files
+  } catch (e) {
+    dbg(`stageOnView failed: ${e.message}`);
+  }
 }
 
 // Resolve the ref to diff against: the merge-base of `base` and HEAD, NOT base's tip. This matches
@@ -350,8 +398,33 @@ async function viewedEntries(cwd, rels) {
   return map;
 }
 
+// vetty.ignorePatterns: settings-level globs (a layer on top of .gitignore, no repo file) — matches
+// land in the Untracked group automatically. `**` crosses slashes, `*`/`?` don't; a pattern with a
+// slash anchors to the repo-relative path, without one it matches any path segment.
+let ignoreRegexes = null; // recompiled when the setting changes (config listener calls resetIgnorePatterns)
+function resetIgnorePatterns() {
+  ignoreRegexes = null;
+}
+function ignoredByPattern(rel) {
+  if (!ignoreRegexes) {
+    const pats = vscode.workspace.getConfiguration('vetty').get('ignorePatterns', []) || [];
+    ignoreRegexes = pats
+      .filter((p) => typeof p === 'string')
+      .map(require('../lib').globToRegex)
+      .filter(Boolean);
+  }
+  return ignoreRegexes.some((re) => re.test(rel));
+}
+
 // Ignored marks are a plain per-branch list of paths — a deliberate exclusion, so (unlike viewed) it
 // is not tied to content hash. Ignored files get their own tree group, out of Unviewed/Viewed.
+// The Set's `has` also consults vetty.ignorePatterns, so every consumer sees pattern matches as
+// ignored; iteration/spread still yields only the explicit per-branch entries (what setIgnored saves).
+class IgnoredSet extends Set {
+  has(rel) {
+    return super.has(rel) || ignoredByPattern(rel);
+  }
+}
 function ignoredKey(base) {
   return `vetty.ignored.${stateScope(base)}`;
 }
@@ -359,7 +432,7 @@ function getIgnored(context, base) {
   const k = ignoredKey(base);
   if (!stateCache.has(k)) {
     const raw = context.workspaceState.get(k);
-    stateCache.set(k, new Set(Array.isArray(raw) ? raw : []));
+    stateCache.set(k, new IgnoredSet(Array.isArray(raw) ? raw : []));
   }
   return stateCache.get(k);
 }
@@ -584,6 +657,16 @@ async function pruneStaleState(context, cwd) {
   }
 }
 
+/** Stage-on-view's symmetric half: with the mode on, unviewing also unstages. Best-effort. */
+async function unstageOnUnview(cwd, rels) {
+  if (!vscode.workspace.getConfiguration('vetty').get('stageOnView', false)) return;
+  try {
+    for (let i = 0; i < rels.length; i += 100) await git(cwd, ['restore', '--staged', '--', ...rels.slice(i, i + 100)]);
+  } catch {
+    // nothing staged / not in HEAD — fine
+  }
+}
+
 /** The merge-base moved (base was rebased/merged into the branch) → fully unview marks whose file
  *  content changed: their since-review snapshots predate the rebase, so the overlay would present
  *  the BASE's incoming changes as reviewable work. Untouched files keep their marks. */
@@ -642,17 +725,17 @@ function hasSinceReviewDiff(context, cwd, base, rel) {
 }
 
 module.exports = {
-  app, refreshTree,
+  app, refreshTree, dbg, updateDebugFlag, showDebugLog,
   LAST_BRANCH_KEY, MAX_OPEN_WITHOUT_CONFIRM, REVIEW_KEY, FOLDER_KEY,
   BASE_SCHEME, BLOB_SCHEME, baseUriFor, blobUriFor, baseContentProvider, blobContentProvider,
   workspaceFolderPath, getCwd, resolveRepoRoot, watchGitDir,
-  git, gitStdin, gitAddChunked, mergeBaseRef,
+  git, gitStdin, gitAddChunked, gitBlobBytes, stageOnView, unstageOnUnview, mergeBaseRef,
   gh, ghAvailable, prEnabled, updatePrMode, detectGh,
   TODO_RE, findTodos, untrackedFiles,
   hashCache, fileHash,
   stateScope,
   getViewed, setViewed, viewedHash, reviewedBlob, isViewed, viewedEntry, viewedEntries,
-  getIgnored, setIgnored, getGroups, setGroups, groupNames,
+  getIgnored, setIgnored, ignoredByPattern, resetIgnorePatterns, getGroups, setGroups, groupNames,
   activeRelPath, aheadBehind, MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,
   currentBranch, localBranches, defaultBase, branchCreatedAt, setBaseFor, resolveBase, lastBranch, pruneStaleState,
   purgeOnMergeBaseChange,

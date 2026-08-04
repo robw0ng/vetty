@@ -72,7 +72,9 @@ object VettyParse {
         var newLine = 0
         val hunkRe = Regex("""^@@ -\d+(?:,\d+)? \+(\d+)""")
         for (line in out.split("\n")) {
-            if (line.startsWith("+++ ")) { rel = line.substring(4).removePrefix("b/"); continue }
+            // Git appends a trailing TAB to the header when the path contains spaces (GNU patch
+            // compat) — without stripping it, the recorded path never matches the review set.
+            if (line.startsWith("+++ ")) { rel = line.substring(4).removePrefix("b/").trimEnd('\t', '\r'); continue }
             if (line.startsWith("---")) continue
             val hunk = hunkRe.find(line)
             if (hunk != null) { newLine = hunk.groupValues[1].toInt(); continue }

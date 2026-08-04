@@ -50,6 +50,14 @@ class VettyParseTest {
         assertEquals("src/a.kt:5 — fix this", VettyParse.exportComments(listOf(c)))
     }
 
+    @Test fun parseTodoHunks_stripsTrailingTabOnSpacedPaths() {
+        // Git appends a trailing TAB to the +++ header when the path contains spaces.
+        val diff = "+++ b/src/Back End/Foo.cs\t\n@@ -0,0 +1 @@\n+// TODO: scoped"
+        val todos = VettyParse.parseTodoHunks(diff, VettyService.TODO_RE)
+        assertEquals(1, todos.size)
+        assertEquals("src/Back End/Foo.cs", todos[0].first)
+    }
+
     // The branch swap-and-back bug: autocrlf rewrites files with flipped EOLs; a content hash built
     // on eolNormalize must treat CRLF/LF variants as identical, or every mark dies on checkout.
     @Test fun eolNormalize_crlfAndLfVariantsAreIdentical() {

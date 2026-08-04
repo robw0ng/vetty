@@ -173,17 +173,58 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         ApplicationManager.getApplication().executeOnPooledThread { work(); reload(after) }
     }
 
-    /** Inline row buttons: view/unview (check=View, X=Unview) or Track for noise rows, + Open File.
-     *  (Untrack lives only in the right-click menu.) */
+    /** Inline row buttons: view/unview (check=View, X=Unview) or Track for noise rows, + Open File,
+     *  + state-dependent revert: viewed rows get full Revert (to HEAD), unviewed rows with a
+     *  last-viewed snapshot get Revert to Last Viewed. (Untrack lives only in the right-click menu.) */
+    /** "View" / "Unview", suffixed with the staging side effect when stage-on-view is on. */
+    private fun viewLabel(viewed: Boolean) =
+        if (svc.stageOnView()) (if (viewed) "Unview & Unstage" else "View & Stage")
+        else (if (viewed) "Unview" else "View")
+
     private fun fileActions(vf: VFile): List<Triple<javax.swing.Icon, String, () -> Unit>> = buildList {
+        // Order: revert → open → view/unview (revert first, primary review action last).
+        // One revert per row — the most likely one for its state; both live in the right-click menu.
+        if (vf.group == Group.VIEWED) {
+            add(Triple(AllIcons.Actions.Rollback, "Revert Changes") { confirmRevert(listOf(vf)) })
+        } else if (vf.group == Group.UNVIEWED) {
+            if (svc.hasSnapshot(vf.rel)) add(Triple(AllIcons.Vcs.History, "Revert to Last Viewed") { confirmRevertToViewed(listOf(vf)) })
+            else add(Triple(AllIcons.Actions.Rollback, "Revert Changes") { confirmRevert(listOf(vf)) })
+        }
+        add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
         if (vf.group != Group.UNTRACKED) {
             val viewed = vf.group == Group.VIEWED
             val icon = if (viewed) AllIcons.Actions.Cancel else AllIcons.Actions.Checked
-            add(Triple(icon, if (viewed) "Unview" else "View") { offEdt(after = { select(vf.rel) }) { svc.toggleViewed(vf.rel) } })
+            add(Triple(icon, viewLabel(viewed)) { offEdt(after = { select(vf.rel) }) { svc.toggleViewed(vf.rel) } })
         } else {
             add(Triple(AllIcons.General.Add, "Track") { offEdt { svc.track(vf.rel) } })
         }
-        add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
+    }
+
+    /** Confirm + discard changes (restore to HEAD; untracked files deleted). */
+    private fun confirmRevert(sel: List<VFile>) {
+        if (sel.isEmpty()) return
+        val what = if (sel.size == 1) "\"${sel[0].rel}\"" else "${sel.size} files"
+        if (Messages.showYesNoDialog(project,
+                "Discard changes to $what? Untracked files will be deleted. This cannot be undone.",
+                "Vetty: Revert", Messages.getWarningIcon()) == Messages.YES) {
+            offEdt { sel.forEach { svc.revertFile(it.rel) } }
+        }
+    }
+
+    /** Confirm + restore to the last-viewed snapshot (rows flip back to Viewed automatically). */
+    private fun confirmRevertToViewed(sel: List<VFile>) {
+        if (sel.isEmpty()) return
+        val what = if (sel.size == 1) "\"${sel[0].rel}\"" else "${sel.size} files"
+        if (Messages.showYesNoDialog(project,
+                "Restore $what to the last-viewed content? Edits made since your review will be lost.",
+                "Vetty: Revert to Last Viewed", Messages.getWarningIcon()) == Messages.YES) {
+            offEdt {
+                val missed = sel.count { !svc.revertToLastViewed(it.rel) }
+                if (missed > 0) ApplicationManager.getApplication().invokeLater {
+                    Messages.showInfoMessage(project, "$missed file(s) had no last-viewed snapshot.", "Vetty")
+                }
+            }
+        }
     }
 
     /** Inline row buttons on a comment row: Copy + Delete. */
@@ -296,7 +337,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     init {
         val group = DefaultActionGroup().apply {
-            add(RefreshAction()); add(ChangeBaseAction()); add(RangeAction()); add(SinceReviewAction()); add(WhitespaceAction())
+            add(RefreshAction()); add(ChangeBaseAction()); add(RangeAction()); add(SinceReviewAction()); add(WhitespaceAction()); add(StageOnViewAction()); add(IgnorePatternsAction())
             addSeparator()
             add(NestedToggleAction()); add(ExpandAllAction()); add(CollapseAllAction())
         }
@@ -583,7 +624,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         val inUntracked = activeFile()?.group == Group.UNTRACKED
         val group = DefaultActionGroup().apply {
             if (!inUntracked) {
-                add(simpleAction(if (activeFile()?.group == Group.VIEWED) "Unview" else "View") { toggleViewedSelected() })
+                add(simpleAction(viewLabel(activeFile()?.group == Group.VIEWED)) { toggleViewedSelected() })
             }
             // Whole selection: single file → in-place preview; several → pinned tabs for each.
             add(simpleAction("Open Diff") {
@@ -592,6 +633,9 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             })
             add(simpleAction("Open File") { selectedFiles().forEach { svc.openFile(it.rel) } })
             addSeparator()
+            add(simpleAction("Revert to Last Viewed…") { confirmRevertToViewed(selectedFiles()) })
+            add(simpleAction("Revert Changes…") { confirmRevert(selectedFiles()) })
+            addSeparator()   // Track/Untrack stays the bottom entry
             if (inUntracked) add(simpleAction("Track") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
             else add(simpleAction("Untrack") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
         }
@@ -932,6 +976,19 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         override fun getActionUpdateThread() = ActionUpdateThread.EDT
     }
 
+    private inner class IgnorePatternsAction :
+        UiAction("Ignore Patterns", "Globs sent to Untracked, one per line — a review-noise layer on top of .gitignore", AllIcons.General.Filter) {
+        override fun actionPerformed(e: AnActionEvent) {
+            val cur = svc.ignoreGlobs().joinToString("\n")
+            val next = Messages.showMultilineInputDialog(
+                project,
+                "One glob per line (e.g. *.g.cs, **/migrations/**, package-lock.json).\n`**` crosses folders; a pattern with `/` matches the repo-relative path.",
+                "Vetty Ignore Patterns", cur, AllIcons.General.Filter, null) ?: return
+            svc.setIgnoreGlobs(next.split("\n"))
+            reload()
+        }
+    }
+
     private inner class RefreshAction : UiAction("Refresh", "Reload changed files", AllIcons.Actions.Refresh) {
         override fun actionPerformed(e: AnActionEvent) = reload()
     }
@@ -978,6 +1035,14 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             e.presentation.text = if (commit) "Range: uncommitted (vs HEAD)" else "Range: whole branch"
         }
         override fun actionPerformed(e: AnActionEvent) { svc.toggleRange(); reload() }
+    }
+
+    /** Opt-in: marking a file viewed also stages it (reviewed ⇒ staged). */
+    private inner class StageOnViewAction :
+        ToggleAction("Stage on View", "Marking a file viewed also stages it", AllIcons.Actions.Commit) {
+        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun isSelected(e: AnActionEvent) = svc.stageOnView()
+        override fun setSelected(e: AnActionEvent, state: Boolean) { svc.toggleStageOnView() }
     }
 
     /** Hide files whose changes are whitespace-only (formatting noise). */

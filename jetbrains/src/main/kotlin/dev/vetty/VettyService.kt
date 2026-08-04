@@ -48,6 +48,11 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         val TODO_RE = Regex("""\b(TODO|FIXME|HACK|XXX|BUG|NOTE|OPTIMIZE|REVIEW|WIP|TEMP|REFACTOR|DEPRECATED)\b""")
         val TRUNKS = listOf("main", "master", "develop", "dev", "trunk")
         const val PARENT_MAX_AHEAD = 500   // beyond this an "ancestor" is an old merged branch, not a base
+
+        // Churn hunting: enable via Help ▸ Diagnostic Tools ▸ Debug Log Settings → add `#dev.vetty`,
+        // then watch idea.log for git spawn timings and load summaries.
+        private val LOG = com.intellij.openapi.diagnostic.Logger.getInstance("#dev.vetty")
+        fun dbg(msg: () -> String) { if (LOG.isDebugEnabled) LOG.debug(msg()) }
     }
 
     /** Set by the tool window so git/comment changes can refresh the tree (full reload). */
@@ -83,8 +88,10 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         val cmd = GeneralCommandLine(mutableListOf("git", "-c", "core.quotePath=false", *args))
             .withWorkDirectory(root)
             .withCharset(StandardCharsets.UTF_8)
+        val t0 = System.currentTimeMillis()
         return try {
             val out = ExecUtil.execAndGetOutput(cmd)
+            dbg { "git ${args.take(4).joinToString(" ")}${if (args.size > 4) " …" else ""} — ${System.currentTimeMillis() - t0}ms" }
             if (out.exitCode == 0) out.stdout else ""
         } catch (e: Exception) {
             ""
@@ -263,6 +270,8 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     fun toggleNested() { state.nested = !state.nested }
     fun hideWhitespace(): Boolean = state.hideWhitespace
     fun toggleHideWhitespace() { state.hideWhitespace = !state.hideWhitespace }
+    fun stageOnView(): Boolean = state.stageOnView
+    fun toggleStageOnView() { state.stageOnView = !state.stageOnView; scheduleSave() }
     fun welcomed(): Boolean = state.welcomed
     fun setWelcomed() { state.welcomed = true }
 
@@ -322,6 +331,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     /** Full changed-file model, grouped Unviewed / Viewed / Untracked(= user-marked noise). */
     fun load(): List<VFile> {
+        val t0 = System.currentTimeMillis()
         baseRefCache = null   // recompute merge-base once per refresh (cheap reuse across diff clicks)
         resolveBase()         // per-branch base memory + ancestor inference; re-resolves on branch switch
         purgeOnMergeBaseChange()
@@ -350,9 +360,23 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             outs[5].split("\n").mapNotNull { it.split("\t").getOrNull(2)?.trim()?.ifEmpty { null } }.toHashSet()
         else null
         fun mark(rel: String) = if (rel in stagedSet) (if (rel in dirtySet) "^" else "*") else ""
+        val nameStatus = VettyParse.parseNameStatus(outs[1])
+        // Stage-on-view sync: staging outside vetty (commit pane) counts as a review too. Only
+        // clean staged files (index == working tree) qualify — a stale-staged file's working
+        // copy holds unreviewed edits.
+        if (state.stageOnView) {
+            for (rel in stagedSet) if (rel !in dirtySet && !isViewed(rel) && !isIgnored(rel)) markViewed(rel)
+            // Commit self-heal: format-on-commit hooks (lint-staged etc.) rewrite reviewed files during
+            // the commit, so their hash-bound marks go stale even though the new content is exactly what
+            // got committed. Commit ⊇ staging ⇒ view: a file that ALREADY holds a mark and is now clean
+            // vs HEAD re-heals instead of dropping to Unviewed. Never creates marks.
+            for ((status, rel) in nameStatus)
+                if (status != "D" && rel !in stagedSet && rel !in dirtySet &&
+                    state.viewed.containsKey(key(rel)) && !isViewed(rel) && !isIgnored(rel)) markViewed(rel)
+        }
         val files = ArrayList<VFile>()
         val seen = HashSet<String>()
-        for ((status, rel) in VettyParse.parseNameStatus(outs[1])) {
+        for ((status, rel) in nameStatus) {
             seen.add(rel)
             val (add, del) = nums[rel] ?: (0 to 0)
             files.add(VFile(rel, status, add, del, groupFor(rel),
@@ -363,6 +387,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             if (rel in seen) continue
             files.add(VFile(rel, "U", untrackedLineCount(rel), 0, groupFor(rel)))
         }
+        dbg { "load done — ${System.currentTimeMillis() - t0}ms, ${files.size} files (base ${state.base})" }
         return files.sortedBy { it.rel }
     }
 
@@ -396,9 +421,39 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     // --- track / untrack (noise files) ------------------------------------------------------
 
-    fun isIgnored(rel: String): Boolean = state.ignored.contains(key(rel))
+    fun isIgnored(rel: String): Boolean = state.ignored.contains(key(rel)) || ignoredByGlob(rel)
     fun untrack(rel: String) { if (base() != null && !isIgnored(rel)) { state.ignored.add(key(rel)); scheduleSave() } }   // push to Untracked/noise
-    fun track(rel: String) { if (state.ignored.remove(key(rel))) scheduleSave() }   // bring back
+    fun track(rel: String) {   // bring back
+        if (state.ignored.remove(key(rel))) scheduleSave()
+        if (ignoredByGlob(rel)) com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+            com.intellij.openapi.ui.Messages.showInfoMessage(
+                project, "\"$rel\" matches a Vetty ignore pattern — edit Ignore Patterns (toolbar) to track it.", "Vetty")
+        }
+    }
+
+    // Ignore patterns: settings-level globs — matches land in Untracked (a layer on top of .gitignore).
+    // `**` crosses slashes, `*`/`?` don't; a pattern with `/` anchors to the repo-relative path,
+    // without one it matches any path segment. Compiled regexes cached until the pattern list changes.
+    @Volatile private var ignoreRegexCache: Pair<List<String>, List<Regex>>? = null
+    fun ignoredByGlob(rel: String): Boolean {
+        val pats = state.ignoreGlobs.mapNotNull { p -> p.trim().ifEmpty { null } }
+        if (pats.isEmpty()) return false
+        val cached = ignoreRegexCache
+        val rx = if (cached != null && cached.first == pats) cached.second else pats.mapNotNull { p ->
+            val ds = 1.toChar().toString()   // placeholder so `**` survives the `*` rewrite
+            val src = p.replace(Regex("[.+^\${}()|\\[\\]\\\\]")) { "\\" + it.value }
+                .replace("**", ds).replace("*", "[^/]*").replace("?", "[^/]").replace(ds, ".*")
+            try { Regex(if ('/' in p) "^$src\$" else "(^|/)$src(/|\$)") } catch (e: Exception) { null }
+        }.also { ignoreRegexCache = pats to it }
+        return rx.any { it.containsMatchIn(rel) }
+    }
+
+    fun ignoreGlobs(): List<String> = state.ignoreGlobs
+    fun setIgnoreGlobs(globs: List<String>) {
+        state.ignoreGlobs = globs.mapNotNull { g -> g.trim().ifEmpty { null } }.toMutableList()
+        ignoreRegexCache = null
+        scheduleSave()
+    }
 
     private fun untracked(): List<String> =
         git("ls-files", "--others", "--exclude-standard").split("\n").map { it.trim() }.filter { it.isNotEmpty() }
@@ -482,21 +537,66 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     /** True when [rel] has a usable since-last-review snapshot (overlay on + blob present + changed since). */
     fun hasSinceReviewDiff(rel: String): Boolean = sinceReview() && reviewedBlob(rel) != null && !isViewed(rel)
 
+    /** True when [rel] has a last-viewed snapshot blob (gates the Revert-to-Last-Viewed button). */
+    fun hasSnapshot(rel: String): Boolean = reviewedBlob(rel) != null
+
     fun markViewed(rel: String) {
         if (base() == null) return   // no base yet → key would be "null\t…" garbage in vetty.xml
         val root = repoRoot()
         if (root != null && !java.io.File(root, rel).exists()) {
             // Deletion tombstone ('D' — not a valid sha1): viewed while the file stays gone,
             // re-flags unviewed if it comes back.
-            state.viewed[key(rel)] = "D\t"; scheduleSave(); blobCheck.remove(key(rel)); return
+            state.viewed[key(rel)] = "D\t"; scheduleSave(); blobCheck.remove(key(rel))
+            if (state.stageOnView && commentsFor(rel).isEmpty()) git("add", "--", rel)   // stages the deletion too
+            return
         }
         val blob = git("hash-object", "-w", "--", rel).trim()   // snapshot blob for the since-review diff
         val h = fileHash(rel) ?: ""
         if (h.isNotEmpty() || blob.isNotEmpty()) { state.viewed[key(rel)] = "$h\t$blob"; scheduleSave() }
         blobCheck.remove(key(rel))
+        // Opt-in: reviewed ⇒ staged — but a file with open comments is "changes requested", so it
+        // stays unstaged (staged = viewed ∧ no open comments). All markViewed callers already run
+        // off the EDT, so the extra git spawn is safe here.
+        if (state.stageOnView && commentsFor(rel).isEmpty()) git("add", "--", rel)
     }
 
-    fun unmarkViewed(rel: String) { if (state.viewed.remove(key(rel)) != null) scheduleSave(); blobCheck.remove(key(rel)) }
+    fun unmarkViewed(rel: String) {
+        if (state.viewed.remove(key(rel)) != null) scheduleSave()
+        blobCheck.remove(key(rel))
+        if (state.stageOnView) git("restore", "--staged", "--", rel)   // symmetric: unview ⇒ unstage
+    }
+
+    /** Discard a file's changes — restore to HEAD; untracked files are deleted. Caller confirms first. */
+    fun revertFile(rel: String) {
+        val root = repoRoot() ?: return
+        val f = java.io.File(root, rel)
+        val tracked = git("ls-files", "--", rel).trim().isNotEmpty()
+        if (tracked) git("restore", "--source=HEAD", "--staged", "--worktree", "--", rel)
+        else if (f.exists()) f.delete()
+    }
+
+    /** Restore [rel] to its last-viewed snapshot. The restored content hashes back to the mark, so
+     *  the file flips back to Viewed automatically. Returns false when no snapshot exists. */
+    fun revertToLastViewed(rel: String): Boolean {
+        val blob = reviewedBlob(rel) ?: return false
+        val root = repoRoot() ?: return false
+        // Binary-safe blob read (ExecUtil's string stdout would corrupt binaries).
+        val bytes = try {
+            val p = ProcessBuilder(listOf("git", "cat-file", "blob", blob))
+                .directory(java.io.File(root))
+                .redirectError(ProcessBuilder.Redirect.DISCARD)
+                .start()
+            val out = p.inputStream.readBytes()
+            if (p.waitFor() == 0) out else return false
+        } catch (e: Exception) { return false }
+        java.io.File(root, rel).writeBytes(bytes)
+        // Sync the index: a staged copy of the pre-revert content would keep the commit pane
+        // showing phantom changes after the restore.
+        if (state.stageOnView || git("diff", "--relative", "--cached", "--name-only", "--", rel).trim().isNotEmpty())
+            git("add", "--", rel)
+        LocalFileSystem.getInstance().refreshAndFindFileByPath("$root/$rel")?.refresh(false, false)
+        return true
+    }
 
     fun toggleViewed(rel: String) { if (isViewed(rel)) unmarkViewed(rel) else markViewed(rel) }
 
@@ -778,11 +878,42 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             this.branch = curBranch ?: base() ?: ""
         })
         scheduleSave()
+        unstageForComment(rel)
     }
 
-    fun deleteComment(c: VettyStateService.Comment) { state.comments.remove(c); scheduleSave() }
+    fun deleteComment(c: VettyStateService.Comment) {
+        state.comments.remove(c); scheduleSave()
+        unviewOnCommentResolve(listOf(c.file))
+    }
 
-    fun clearComments() { state.comments.removeAll { onBranch(it) }; scheduleSave() }   // current branch only
+    fun clearComments() {   // current branch only
+        val rels = allComments().map { it.file }.distinct()
+        state.comments.removeAll { onBranch(it) }; scheduleSave()
+        unviewOnCommentResolve(rels)
+    }
+
+    /** Stage-on-view mode: resolving a file's LAST comment re-opens the verdict — the file returns
+     *  to Unviewed, so the next explicit view is the approval that stages it. Pooled (EDT-safe). */
+    private fun unviewOnCommentResolve(rels: List<String>) {
+        if (!state.stageOnView) return
+        val drop = rels.distinct().filter { commentsFor(it).isEmpty() && state.viewed.containsKey(key(it)) }
+        if (drop.isEmpty()) return
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            for (rel in drop) unmarkViewed(rel)   // unview ⇒ unstage included
+            refreshUiAndGutters()
+        }
+    }
+
+    /** Comments = request changes (stage-on-view mode): commenting on a viewed file unstages it.
+     *  Deleting/resolving comments never auto-stages — staging comes back only via an explicit
+     *  (re-)view, and markViewed itself skips files that still have open comments.
+     *  Pooled — comments are added from the EDT and git may not spawn there. */
+    private fun unstageForComment(rel: String) {
+        if (!state.stageOnView) return
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread {
+            if (isViewed(rel)) { git("restore", "--staged", "--", rel); refreshUiAndGutters() }
+        }
+    }
 
     /** Export this branch's comments paste-ready for an agent, like VS Code. */
     fun exportComments(): String {

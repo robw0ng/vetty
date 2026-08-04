@@ -6,7 +6,7 @@ const path = require('path');
 const { parseNumstat } = require('../lib');
 const core = require('./core');
 const {
-  app, getCwd, git, untrackedFiles, getViewed, getIgnored, getGroups, setGroups, isViewed,
+  app, getCwd, git, untrackedFiles, getViewed, setViewed, viewedEntries, getIgnored, getGroups, setGroups, isViewed,
   resolveBase, mergeBaseRef, lastBranch, shortRef, baseUriFor, blobUriFor, reviewedBlob,
   DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff, findTodos, refreshTree,
 } = core;
@@ -127,6 +127,7 @@ class DiffTree {
   }
 
   async load() {
+    const t0 = Date.now();
     const cwd = getCwd();
     this.base = cwd ? await resolveBase(this.context, cwd) : lastBranch(this.context);
     this.baseRef = cwd && this.base ? await mergeBaseRef(cwd, this.base) : this.base;
@@ -191,9 +192,35 @@ class DiffTree {
           const rel = r.trim();
           if (rel) staged.add(rel);
         }
+        const dirty = new Set(); // working ≠ index (any file)
         for (const r of dirtyOut.split('\n')) {
           const rel = r.trim();
-          if (rel && staged.has(rel)) staleStaged.add(rel); // working ≠ index on a staged file
+          if (!rel) continue;
+          dirty.add(rel);
+          if (staged.has(rel)) staleStaged.add(rel); // working ≠ index on a staged file
+        }
+        // Stage-on-view sync: staging outside vetty (Source Control panel) counts as a review too.
+        // Only clean staged files (index == working tree) qualify — a stale-staged file's working
+        // copy holds unreviewed edits.
+        if (vscode.workspace.getConfiguration('vetty').get('stageOnView', false)) {
+          const viewed = getViewed(this.context, this.base);
+          const ignored = getIgnored(this.context, this.base);
+          const auto = [...staged].filter(
+            (r) => status.has(r) && !staleStaged.has(r) && !ignored.has(r) && !isViewed(cwd, viewed, r)
+          );
+          // Commit self-heal: format-on-commit hooks (lint-staged etc.) rewrite reviewed files
+          // during the commit, so their hash-bound marks go stale even though the new content is
+          // exactly what got committed. Commit ⊇ staging ⇒ view: a file that ALREADY holds a mark
+          // and is now clean vs HEAD re-heals instead of dropping to Unviewed. Never creates marks.
+          const healed = files.filter(
+            (r) => viewed[r] !== undefined && !staged.has(r) && !dirty.has(r) && !deleted.has(r) &&
+              !ignored.has(r) && !isViewed(cwd, viewed, r)
+          );
+          const marks = [...auto, ...healed];
+          if (marks.length) {
+            Object.assign(viewed, await viewedEntries(cwd, marks));
+            await setViewed(this.context, this.base, viewed);
+          }
         }
       } catch {
         // leave empty
@@ -221,6 +248,7 @@ class DiffTree {
     require('./search').postSearchCounts(); // lazy: search requires this module's app refs via core
     fileDecorations.refresh();
     app.todoTree?.load();
+    core.dbg(`load done — ${Date.now() - t0}ms, ${files.length} files (base ${this.base})`);
   }
 
   /** Show "N/total viewed · <mode>" by the title + a comment-count badge on the view. */
@@ -387,7 +415,10 @@ class DiffTree {
     it.rel = rel;
     it.id = `file:${this.base}:${rel}`; // stable id so reveal() can match across refreshes
     it.resourceUri = vscode.Uri.file(path.join(cwd, rel));
-    it.contextValue = isIgnored ? 'file-ignored' : viewed ? 'file-viewed' : 'file-unviewed';
+    // -snap suffix = unviewed but a last-viewed snapshot exists → the row offers "Revert to Last
+    // Viewed" inline. Menu when-clauses match by prefix so the suffix stays invisible to them.
+    const snap = !viewed && !isIgnored && reviewedBlob(getViewed(this.context, this.base), rel);
+    it.contextValue = isIgnored ? 'file-ignored' : viewed ? 'file-viewed' : snap ? 'file-unviewed-snap' : 'file-unviewed';
     const stageNote = this.staleStaged?.has(rel)
       ? ' — staged, but modified since (restage before commit)'
       : this.staged?.has(rel) ? ' — staged' : '';

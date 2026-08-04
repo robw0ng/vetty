@@ -39,7 +39,9 @@ function parseTodoHunks(out, re) {
   let newLine = 0;
   for (const line of String(out).split('\n')) {
     if (line.startsWith('+++ ')) {
-      rel = line.slice(4).replace(/^b\//, '');
+      // Git appends a trailing TAB to the header when the path contains spaces (GNU patch compat) —
+      // without stripping it, the recorded path never matches the review set.
+      rel = line.slice(4).replace(/^b\//, '').replace(/[\t\r]+$/, '');
       continue;
     }
     if (line.startsWith('---')) continue;
@@ -73,4 +75,24 @@ function eolNormalize(buf) {
   return out.subarray(0, n);
 }
 
-module.exports = { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks, eolNormalize };
+/** Ignore-pattern glob → RegExp: `**` crosses slashes, `*`/`?` don't; a pattern containing `/`
+ *  anchors to the repo-relative path, otherwise it matches any path segment. null if malformed. */
+function globToRegex(pattern) {
+  const p = String(pattern).trim();
+  if (!p) return null;
+  const DS = String.fromCharCode(1); // placeholder so `**` survives the `*` rewrite
+  const src = p
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, DS)
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]')
+    .split(DS)
+    .join('.*');
+  try {
+    return new RegExp(p.includes('/') ? `^${src}$` : `(^|/)${src}(/|$)`);
+  } catch {
+    return null;
+  }
+}
+
+module.exports = { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks, eolNormalize, globToRegex };

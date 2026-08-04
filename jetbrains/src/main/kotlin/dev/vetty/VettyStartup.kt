@@ -41,6 +41,7 @@ class VettyStartup : ProjectActivity {
             override fun after(events: List<out VFileEvent>) {
                 // VFS events are application-wide — only refresh for changes inside THIS project.
                 if (base == null || events.none { it.path.startsWith("$base/") }) return
+                VettyService.dbg { "vfs → reload: ${events.firstOrNull { it.path.startsWith("$base/") }?.path} (+${events.size - 1} more)" }
                 alarm.cancelAllRequests()
                 alarm.addRequest({ project.service<VettyService>().onChange?.invoke() }, 150)
             }

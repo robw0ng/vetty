@@ -2,7 +2,7 @@
 // Run: node test/smoke.js
 'use strict';
 const assert = require('assert');
-const { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks, eolNormalize } = require('../lib');
+const { lineRef, buildSearchRegex, parseAheadBehind, parseNumstat, parseTodoHunks, eolNormalize, globToRegex } = require('../lib');
 
 // lineRef: single line, multi-line, and the column-0 end (exclusive last line).
 assert.strictEqual(lineRef(11, 11, 5), '12', 'single line');
@@ -47,6 +47,27 @@ assert.deepStrictEqual(todos, [
   { rel: 'foo.js', line: 11, text: '// TODO: fix this' },
   { rel: 'foo.js', line: 22, text: '// FIXME later' },
 ], 'TODO at +11, FIXME at +22 (deletion does not advance the new-file counter)');
+
+// Paths with spaces: git appends a trailing TAB to the +++ header — must be stripped or the
+// recorded path never matches the review set (real bug: "src/Back End/...").
+{
+  const spaced = parseTodoHunks('+++ b/src/Back End/Foo.cs\t\n@@ -0,0 +1 @@\n+// TODO: scoped', re);
+  assert.deepStrictEqual(spaced, [{ rel: 'src/Back End/Foo.cs', line: 1, text: '// TODO: scoped' }],
+    'trailing tab on spaced paths stripped');
+}
+
+// globToRegex: ignore-pattern semantics — ** crosses slashes, * doesn't, /-containing anchors to path.
+{
+  const m = (pat, rel) => { const re = globToRegex(pat); return !!re && re.test(rel); };
+  assert.ok(m('*.g.cs', 'src/Gen/Foo.g.cs'), 'extension glob matches basename anywhere');
+  assert.ok(!m('*.g.cs', 'src/Gen/Foo.cs'), 'extension glob is exact');
+  assert.ok(m('migrations', 'db/migrations/001.sql'), 'bare name matches any path segment');
+  assert.ok(m('**/migrations/**', 'db/migrations/001.sql'), '** crosses folders');
+  assert.ok(m('package-lock.json', 'package-lock.json'), 'root file');
+  assert.ok(!m('src/*.js', 'src/deep/a.js'), 'single * does not cross slashes');
+  assert.ok(m('src/**/*.js', 'src/deep/deeper/a.js'), '** in the middle');
+  assert.strictEqual(globToRegex('   '), null, 'blank pattern → null');
+}
 
 // eolNormalize: CRLF / lone CR → LF, everything else byte-preserved.
 assert.deepStrictEqual(eolNormalize(Buffer.from('a\r\nb\r\n')), Buffer.from('a\nb\n'), 'CRLF → LF');

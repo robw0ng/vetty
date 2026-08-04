@@ -4,7 +4,7 @@ const vscode = require('vscode');
 const path = require('path');
 const core = require('./core');
 const {
-  app, refreshTree, getCwd, git, gitAddChunked, mergeBaseRef, untrackedFiles,
+  app, refreshTree, getCwd, git, gitAddChunked, stageOnView, unstageOnUnview, mergeBaseRef, untrackedFiles,
   getViewed, setViewed, isViewed, viewedEntry, viewedEntries, getIgnored, setIgnored,
   getGroups, setGroups, groupNames, activeRelPath, updateViewedContext,
   currentBranch, localBranches, aheadBehind, setBaseFor, lastBranch,
@@ -254,8 +254,8 @@ async function applyViewed(context, makeViewed) {
   }
   const viewed = getViewed(context, base);
   const next = makeViewed === undefined ? !isViewed(cwd, viewed, rel) : makeViewed;
-  if (next) viewed[rel] = await viewedEntry(cwd, rel);
-  else delete viewed[rel];
+  if (next) { viewed[rel] = await viewedEntry(cwd, rel); await stageOnView(context, cwd, [rel]); }
+  else { delete viewed[rel]; await unstageOnUnview(cwd, [rel]); }
   await setViewed(context, base, viewed);
   updateViewedContext(context);
   refreshTree();
@@ -331,8 +331,8 @@ async function treeSetViewed(context, item, sel, makeViewed) {
   const rels = selectedRels(item, sel);
   if (!cwd || !base || !rels.length) return;
   const viewed = getViewed(context, base);
-  if (makeViewed) Object.assign(viewed, await viewedEntries(cwd, rels));
-  else for (const rel of rels) delete viewed[rel];
+  if (makeViewed) { Object.assign(viewed, await viewedEntries(cwd, rels)); await stageOnView(context, cwd, rels); }
+  else { for (const rel of rels) delete viewed[rel]; await unstageOnUnview(cwd, rels); }
   await setViewed(context, base, viewed);
   updateViewedContext(context);
   refreshTree();
@@ -455,7 +455,9 @@ async function markGroupViewed(context) {
   const names = await targetGroupNames(context, 'Mark which group viewed?');
   if (!names) return;
   const viewed = getViewed(context, base);
-  Object.assign(viewed, await viewedEntries(cwd, filesInGroups(getGroups(context, base), names)));
+  const groupFiles = filesInGroups(getGroups(context, base), names);
+  Object.assign(viewed, await viewedEntries(cwd, groupFiles));
+  await stageOnView(context, cwd, groupFiles);
   await setViewed(context, base, viewed);
   updateViewedContext(context);
   refreshTree();
@@ -498,6 +500,79 @@ async function clearGroups(context) {
   refreshTree();
 }
 
+/** Discard the selected files' changes — restore to HEAD (untracked files are deleted). */
+async function revertFiles(context, item, sel) {
+  const cwd = getCwd();
+  const rels = selectedRels(item, sel);
+  if (!cwd || !rels.length) return;
+  const what = rels.length === 1 ? `"${rels[0]}"` : `${rels.length} files`;
+  const ok = await vscode.window.showWarningMessage(
+    `Discard changes to ${what}? Untracked files will be deleted. This cannot be undone.`,
+    { modal: true },
+    'Discard'
+  );
+  if (ok !== 'Discard') return;
+  for (const rel of rels) {
+    try {
+      if (app.diffTree?.status.get(rel) === 'U') {
+        await vscode.workspace.fs.delete(vscode.Uri.file(path.join(cwd, rel))); // untracked → delete
+      } else {
+        await git(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', rel]);
+      }
+    } catch (e) {
+      vscode.window.showErrorMessage(`Revert failed for ${rel}: ${e.message}`);
+    }
+  }
+  await app.diffTree.load();
+}
+
+/** Restore file(s) to the content you last marked viewed (the review snapshot). The restored
+ *  content hashes back to the mark, so the file flips back to Viewed automatically. */
+async function revertToViewed(context, item, sel) {
+  const cwd = getCwd();
+  const base = app.diffTree?.base;
+  const rels = selectedRels(item, sel);
+  if (!cwd || !base || !rels.length) return;
+  const viewed = getViewed(context, base);
+  const withSnap = rels.filter((r) => core.reviewedBlob(viewed, r));
+  if (!withSnap.length) {
+    vscode.window.showInformationMessage('No last-viewed snapshot for the selection.');
+    return;
+  }
+  const what = withSnap.length === 1 ? `"${withSnap[0]}"` : `${withSnap.length} files`;
+  const ok = await vscode.window.showWarningMessage(
+    `Restore ${what} to the last-viewed content? Edits made since your review will be lost.`,
+    { modal: true },
+    'Restore'
+  );
+  if (ok !== 'Restore') return;
+  for (const rel of withSnap) {
+    try {
+      const bytes = await core.gitBlobBytes(cwd, core.reviewedBlob(viewed, rel));
+      await vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(cwd, rel)), bytes);
+    } catch (e) {
+      vscode.window.showErrorMessage(`Restore failed for ${rel}: ${e.message}`);
+    }
+  }
+  // Sync the index: a staged copy of the pre-revert content would keep Source Control showing
+  // phantom changes after the restore — re-add so the index matches the restored content.
+  try {
+    const out = await git(cwd, ['diff', '--cached', '--name-only', '--', ...withSnap]);
+    const resync = out.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (resync.length) await gitAddChunked(cwd, resync);
+  } catch { /* best-effort */ }
+  await stageOnView(context, cwd, withSnap);
+  await app.diffTree.load();
+}
+
+/** Flip the stage-on-view setting (marking viewed also stages the file). */
+async function toggleStageOnView() {
+  const cfg = vscode.workspace.getConfiguration('vetty');
+  const next = !cfg.get('stageOnView', false);
+  await cfg.update('stageOnView', next, vscode.ConfigurationTarget.Global);
+  vscode.window.setStatusBarMessage(`Stage on View ${next ? 'enabled' : 'disabled'}`, 2500);
+}
+
 /** Fetch all remotes (so origin/* bases are current), then reload. */
 async function fetchAndRefresh(context) {
   const cwd = getCwd();
@@ -530,16 +605,19 @@ async function treeMarkAllViewed(context, item) {
   if (!cwd || !base || !item?.files) return;
   const viewed = getViewed(context, base);
   Object.assign(viewed, await viewedEntries(cwd, item.files));
+  await stageOnView(context, cwd, item.files);
   await setViewed(context, base, viewed);
   updateViewedContext(context);
   refreshTree();
 }
 
 async function treeMarkAllUnviewed(context, item) {
+  const cwd = getCwd();
   const base = app.diffTree?.base;
   if (!base || !item?.files) return;
   const viewed = getViewed(context, base);
   for (const rel of item.files) delete viewed[rel];
+  if (cwd) await unstageOnUnview(cwd, item.files);
   await setViewed(context, base, viewed);
   updateViewedContext(context);
   refreshTree();
@@ -552,6 +630,13 @@ async function treeSetIgnored(context, item, sel, makeIgnored) {
   const ig = getIgnored(context, base);
   for (const rel of rels) (makeIgnored ? ig.add(rel) : ig.delete(rel));
   await setIgnored(context, base, ig);
+  if (!makeIgnored) {
+    const stuck = rels.filter((r) => core.ignoredByPattern(r));
+    if (stuck.length)
+      vscode.window.showInformationMessage(
+        `${stuck.length === 1 ? `"${stuck[0]}" matches` : `${stuck.length} files match`} vetty.ignorePatterns — edit the setting to track.`
+      );
+  }
   refreshTree();
 }
 
@@ -583,6 +668,6 @@ module.exports = {
   treeOpenFile, treeOpenDiff, treeSetViewed, treeSetIgnored,
   stageViewed, stageFiles, addToGroup, removeFromGroup,
   stageGroup, markGroupViewed, openGroup, ungroup, clearGroups,
-  fetchAndRefresh, treeOpenGroup, treeMarkAllViewed, treeMarkAllUnviewed,
+  revertFiles, revertToViewed, toggleStageOnView, fetchAndRefresh, treeOpenGroup, treeMarkAllViewed, treeMarkAllUnviewed,
   treePickBranch, treeOpenUnviewed,
 };

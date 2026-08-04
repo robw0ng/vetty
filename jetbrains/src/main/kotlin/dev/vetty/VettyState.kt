@@ -30,12 +30,16 @@ class VettyStateService : PersistentStateComponent<VettyStateService.S> {
         var sinceReview: Boolean = true   // overlay: unviewed files diff against their last-reviewed snapshot
         var nested: Boolean = false       // tree (nested folders) vs flat list
         var hideWhitespace: Boolean = false  // hide files whose changes are whitespace-only
+        var stageOnView: Boolean = false     // marking viewed also stages the file (reviewed ⇒ staged)
         var welcomed: Boolean = false     // first-run welcome dismissed
         // ponytail: viewed key is "base\trel" → git blob id. Flat Map<String,String> serializes
         // reliably (nested maps don't). The blob id IS the content hash and the since-review snapshot.
         var viewed: MutableMap<String, String> = LinkedHashMap()
         // Files the user "untracked" as noise (lockfiles, generated) → shown in the Untracked section. Keys: "base\trel".
         var ignored: MutableList<String> = ArrayList()
+        // Ignore patterns (globs) — matches land in Untracked on every branch; a review-noise layer
+        // on top of .gitignore that lives in IDE state, not a repo file.
+        var ignoreGlobs: MutableList<String> = ArrayList()
         var comments: MutableList<Comment> = ArrayList()
     }
 
