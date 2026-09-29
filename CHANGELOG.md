@@ -1,5 +1,121 @@
 # Changelog
 
+## 0.0.105
+
+Guided review audit — feedback, reading, and a few fixes. Both editors unless noted.
+
+- **New review announced.** When Claude (re)writes the review with Guided Review off, a "Guided
+  review ready for `branch` — Turn on" toast appears; with it on, a quiet "updated: N files, M notes".
+- **Staleness in the view description**: `guided · 2h ago · 3 commits behind · 2 unannotated`. The
+  skill now records `head` + `writtenAt`.
+- **Unannotated files** say so in their tooltip.
+- **Guided notes collapsed by default** (big picture stays open); "Guided Notes: expand/collapse" in
+  the Review ⋯ menu. VS Code.
+- **Clear guided review** in the Guided review section's right-click menu.
+- Wrong-branch toggle message names both branches.
+- Rider gutter tooltips render the note's markdown (bullets, bold, code, tables) instead of raw text.
+- Fixes: a note whose line no longer exists is clamped to the file's last line; selecting a file
+  header or section in the Comments panel copies/deletes everything under it.
+
+## 0.0.104
+
+- **Copy** button on each Comments-panel section header: copy all your comments (+ PR), or all of
+  Claude's guided-review notes, separately. Claude notes copy as markdown under `### file:line`
+  headings so bullets and tables survive. Both editors.
+
+## 0.0.103
+
+- Comments panel splits into **Comments** (yours + PR) and **Guided review** (Claude's notes) as two
+  collapsible sections — collapse Guided review to see only your comments; the collapsed state sticks.
+  With no Claude notes, the panel stays the plain per-file list. Both editors.
+
+## 0.0.102
+
+- Opening a file from the Review list (click, j/k) lands on its **first comment** — yours, Claude's
+  notes while Guided Review is on, or PR threads — instead of the first change, so notes above it
+  aren't scrolled past. No comments → first change, as before. Both editors.
+
+## 0.0.101
+
+- VS Code: Claude note threads say "Claude · guided review" once in the header; the line above the
+  body now says the note's kind (**Big picture** / **Detail**) instead of repeating "Claude".
+
+## 0.0.100
+
+- Tables in Claude notes are a box-drawn grid: a border on every cell, a rule between every row, and
+  a double rule under the header, so rows are as easy to tell apart as columns. Both editors.
+
+## 0.0.99
+
+- Tables in Claude notes render as aligned monospace columns (VS Code's comment widget draws GFM
+  tables with no borders or padding, so columns ran together). Both editors.
+- Skill: big-picture notes are back to 2–4 labeled bullets (`**Called by:**`, `**Implemented in:**`,
+  `**Flow:**` …) — the one-line `← / →` arrows were ambiguous and hard to scan.
+
+## 0.0.98
+
+- VS Code: Claude note threads are headed "Guided review" (the author line already says Claude).
+- Skill: the per-file big-picture note is one line (`what · ← callers · → uses`).
+- Big-picture notes are marked: the skill sets `"kind": "big-picture"`; VS Code heads the thread
+  "Guided review · big picture" (map icon + "big picture" in the sidebar), Rider tags the row and tooltip.
+
+## 0.0.97
+
+- Guided Review rows show only `#n`; Claude's one-line why moved to the row tooltip (it was
+  truncated noise in a narrow sidebar). Both editors.
+- VS Code: file-row tooltips are a formatted card — name + change kind vs base, folder, one line per
+  state (viewed / staged / committed / comments), then `Guided #n · why`. The file-decoration text
+  VS Code appended ("• Changed vs …") is gone.
+
+## 0.0.96
+
+- **Guided Review covers exactly what Vetty lists.** Vetty now publishes its review set (base,
+  merge-base, range, files) to `<git-dir>/vetty/scope.json`; the `vetty-review` skill annotates only
+  those files instead of guessing the diff (Vetty's base is often a parent branch, and it counts
+  uncommitted + untracked files). Order entries and notes on files outside the review are ignored,
+  and `#n` is renumbered over the files actually listed — no more gaps like #1, #3. Both editors.
+- **Vetty: Clear Guided Review** (Ctrl+Shift+P in VS Code, Find Action in Rider) deletes Claude's
+  order and all its notes for the worktree, after a confirm. Shared file, so both editors clear.
+
+## 0.0.95
+
+- **Guided Review** toggle replaces the sort toggle. On: Claude's review order (`#n` + why) AND
+  Claude's notes. Off: regular path order, and Claude's notes are hidden. VS Code moves it into the
+  Review view's **⋯** menu. Both editors.
+
+## 0.0.94
+
+- **Claude review annotations.** Any Claude session can write `<git-dir>/vetty/claude-review.json`
+  (one per worktree, branch-scoped): an intuitive file **review order** with a one-line why per file,
+  plus short **context notes** at specific lines (bullets, tables for state matrices). Both editors
+  pick it up live. The `vetty-review` Claude skill (in `skills/`) teaches the format and writing style.
+- **Claude notes** show inline (expanded, read-only, re-anchored by line text) and in the Comments
+  sidebar under their file. They're context, not change requests: they never block stage-on-view and
+  aren't exported. Delete removes a note from the file, so it's gone in both editors.
+- **Sort: Claude's review order** toolbar toggle: Unviewed/Viewed follow Claude's order, rows show
+  `#n` + the note, and `j`/`k` walk the same order. Unlisted files keep path order after them.
+
+## 0.0.93
+
+- **Uncommitted-only changes show in whole-branch mode.** A change committed and then undone in the
+  working tree nets to zero vs the merge-base, so it used to vanish from Vetty while Source Control
+  still listed it. It now shows, tagged **uncommitted only**, and its diff opens vs HEAD. Both editors.
+- **TODOs and comments are grouped by file**: a header row per file (icon, name, folder, count)
+  with the entries beneath showing `:line`. Both editors.
+- **Stricter TODO matching**: a marker counts only after a comment leader (`// TODO`, `# FIXME`,
+  `/* HACK`, `* NOTE`, `<!-- WIP`, `-- XXX`) or as a `TODO:` / `TODO(name):` label, so identifiers
+  like `%TEMP%`, `$env:TEMP` or `` `TEMP` `` in prose no longer show up. Both editors.
+- **PR comments in the Comments sidebar** (VS Code), with Go to / Copy, and **Delete** to hide a PR
+  comment locally — GitHub is untouched, and it stays hidden across re-pulls and restarts.
+- **Unstage** row action; committed (clean) rows hide Stage / Revert Changes, which would be no-ops.
+- Row badges: `💬N` open comments (why stage-on-view skipped the file), `↻ since view` for a file
+  viewed before and edited since. Stage-on-view says when it skips files that have comments.
+- **checkout -b continuation**: a new child branch inherits its parent's review state (viewed,
+  untracked, groups, comments), hash-gated so only unchanged files stay viewed. Never into a trunk.
+- Revert Changes warns about deletion only when the selection holds untracked files.
+- **Fix** (VS Code): an endless ~400ms refresh loop — Vetty's own `git diff` reads rewrite
+  `.git/index`, which the watcher treated as a change.
+
 ## 0.0.87
 
 - **Stage-on-view mode** (opt-in: `vetty.stageOnView` / Rider toolbar toggle) — viewed = approved =

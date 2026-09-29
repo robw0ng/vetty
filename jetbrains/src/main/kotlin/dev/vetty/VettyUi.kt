@@ -64,6 +64,9 @@ class VettyToolWindowFactory : ToolWindowFactory, DumbAware {
 
 private class GroupNode(val group: Group, val count: Int)
 private class FolderNode(val name: String, val path: String)
+private class FileHeader(val rel: String, val count: Int)   // parent row in the TODO / comment lists
+private class SectionNode(val title: String, val count: Int,   // Comments pane: "Comments" / "Guided review"
+                          val items: List<VettyStateService.Comment>)   // what the header's Copy button copies
 private class Match(val rel: String, val line: Int, val text: String, val col: Int, val len: Int)  // a content-search hit (child row of a file)
 
 class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
@@ -115,6 +118,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private var lastTodos: List<Todo> = emptyList()
     private var visibleTodos: List<Todo> = emptyList()  // the shown slice — Export TODOs copies these
     private var lastComments: List<VettyStateService.Comment> = emptyList()
+    private val collapsedSections = HashSet<String>()   // Comments-pane sections the user collapsed
     private var hoverRow = -1     // row + icon index currently under the cursor (for the hover highlight)
     private var hoverIcon = -1
     private var pressedPath: javax.swing.tree.TreePath? = null  // path under the cursor at mouse-press
@@ -176,25 +180,31 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     /** Inline row buttons: view/unview (check=View, X=Unview) or Track for noise rows, + Open File,
      *  + state-dependent revert: viewed rows get full Revert (to HEAD), unviewed rows with a
      *  last-viewed snapshot get Revert to Last Viewed. (Untrack lives only in the right-click menu.) */
-    /** "View" / "Unview", suffixed with the staging side effect when stage-on-view is on. */
-    private fun viewLabel(viewed: Boolean) =
-        if (svc.stageOnView()) (if (viewed) "Unview & Unstage" else "View & Stage")
-        else (if (viewed) "Unview" else "View")
+    /** "View" / "Unview", suffixed with the staging side effect ONLY when the click will actually
+     *  change the index: View & Stage needs stage-on-view + not already staged; Unview & Unstage
+     *  needs stage-on-view + currently staged. */
+    private fun viewLabel(vf: VFile?): String {
+        val staged = vf?.stageMark?.isNotEmpty() == true
+        return if (vf?.group == Group.VIEWED)
+            if (svc.stageOnView() && staged) "Unview & Unstage" else "Unview"
+        else
+            if (svc.stageOnView() && !staged && vf?.clean != true) "View & Stage" else "View"
+    }
 
     private fun fileActions(vf: VFile): List<Triple<javax.swing.Icon, String, () -> Unit>> = buildList {
         // Order: revert → open → view/unview (revert first, primary review action last).
         // One revert per row — the most likely one for its state; both live in the right-click menu.
-        if (vf.group == Group.VIEWED) {
+        // Untracked rows revert too (delete-or-restore, same confirm). Committed (clean) rows get
+        // no Revert Changes — nothing uncommitted to revert; snapshot restore stays real.
+        if (vf.group == Group.UNVIEWED && svc.hasSnapshot(vf.rel))
+            add(Triple(AllIcons.Vcs.History, "Revert to Last Viewed") { confirmRevertToViewed(listOf(vf)) })
+        else if (!vf.clean)
             add(Triple(AllIcons.Actions.Rollback, "Revert Changes") { confirmRevert(listOf(vf)) })
-        } else if (vf.group == Group.UNVIEWED) {
-            if (svc.hasSnapshot(vf.rel)) add(Triple(AllIcons.Vcs.History, "Revert to Last Viewed") { confirmRevertToViewed(listOf(vf)) })
-            else add(Triple(AllIcons.Actions.Rollback, "Revert Changes") { confirmRevert(listOf(vf)) })
-        }
         add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
         if (vf.group != Group.UNTRACKED) {
             val viewed = vf.group == Group.VIEWED
             val icon = if (viewed) AllIcons.Actions.Cancel else AllIcons.Actions.Checked
-            add(Triple(icon, viewLabel(viewed)) { offEdt(after = { select(vf.rel) }) { svc.toggleViewed(vf.rel) } })
+            add(Triple(icon, viewLabel(vf)) { offEdt(after = { select(vf.rel) }) { svc.toggleViewed(vf.rel) } })
         } else {
             add(Triple(AllIcons.General.Add, "Track") { offEdt { svc.track(vf.rel) } })
         }
@@ -230,7 +240,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     /** Inline row buttons on a comment row: Copy + Delete. */
     private fun commentActions(c: VettyStateService.Comment): List<Triple<javax.swing.Icon, String, () -> Unit>> = listOf(
         Triple(AllIcons.Actions.Copy, "Copy") { copyComments(listOf(c)) },
-        Triple(AllIcons.Actions.GC, "Delete") { svc.deleteComment(c); svc.refreshUiAndGutters() },
+        Triple(AllIcons.Actions.GC, "Delete") { svc.deleteAnyComments(listOf(c)); svc.refreshUiAndGutters() },
     )
 
     /** Inline row button on a TODO row: Copy. */
@@ -337,7 +347,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     init {
         val group = DefaultActionGroup().apply {
-            add(RefreshAction()); add(ChangeBaseAction()); add(RangeAction()); add(SinceReviewAction()); add(WhitespaceAction()); add(StageOnViewAction()); add(IgnorePatternsAction())
+            add(RefreshAction()); add(ChangeBaseAction()); add(RangeAction()); add(SinceReviewAction()); add(GuidedReviewAction()); add(WhitespaceAction()); add(StageOnViewAction()); add(IgnorePatternsAction())
             addSeparator()
             add(NestedToggleAction()); add(ExpandAllAction()); add(CollapseAllAction())
         }
@@ -413,6 +423,11 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                     val acts = vf?.let { fileActions(it) } ?: emptyList()
                     if (vf != null && rb != null && e.x >= rb.x && e.x < rb.x + acts.size * ROW_ICON) {
                         hr = row; hi = ((e.x - rb.x) / ROW_ICON).coerceIn(0, acts.size - 1); tip = acts[hi].second
+                    } else if (vf != null) {
+                        // Guided Review: Claude's one-line why lives in the tooltip, not on the row.
+                        tip = svc.orderStep(vf.rel)?.let { (n, note) -> if (note.isNotEmpty()) "#$n · $note" else null }
+                            ?: if (svc.guidedReview() && svc.steps().isNotEmpty() && vf.group != Group.UNTRACKED)
+                                "Not in guided review — re-run the annotation to cover this file" else null
                     }
                 }
                 tree.toolTipText = tip   // tooltip names the inline action (View / Unview)
@@ -440,7 +455,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             }
         })
         todoTree.isRootVisible = false
-        todoTree.showsRootHandles = false
+        todoTree.showsRootHandles = true   // file header rows expand/collapse
         todoTree.selectionModel.selectionMode = TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION  // Ctrl/Shift multi-select
         todoTree.cellRenderer = cellRenderer
         todoTree.addMouseListener(object : MouseAdapter() {
@@ -478,9 +493,16 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         })
 
         commentTree.isRootVisible = false
-        commentTree.showsRootHandles = false
+        commentTree.showsRootHandles = true
         commentTree.selectionModel.selectionMode = TreeSelectionModel.DISCONTIGUOUS_TREE_SELECTION  // Ctrl/Shift multi-select
         commentTree.cellRenderer = cellRenderer
+        // Remember which Comments-pane sections the user collapsed, so a rebuild doesn't reopen them.
+        commentTree.addTreeExpansionListener(object : javax.swing.event.TreeExpansionListener {
+            private fun title(e: javax.swing.event.TreeExpansionEvent) =
+                ((e.path.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? SectionNode)?.title
+            override fun treeCollapsed(e: javax.swing.event.TreeExpansionEvent) { title(e)?.let { collapsedSections.add(it) } }
+            override fun treeExpanded(e: javax.swing.event.TreeExpansionEvent) { title(e)?.let { collapsedSections.remove(it) } }
+        })
         commentTree.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) = commentPopup(e)
             override fun mouseReleased(e: MouseEvent) = commentPopup(e)
@@ -488,6 +510,12 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                 if (e.isPopupTrigger || !SwingUtilities.isLeftMouseButton(e)) return
                 if (e.isControlDown || e.isShiftDown || e.isMetaDown) return  // multi-select gesture → don't jump
                 val p = commentTree.getPathForLocation(e.x, e.y) ?: return
+                // Section header's Copy icon → copy everything in that section.
+                ((p.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? SectionNode)?.let { s ->
+                    val rb = commentTree.getPathBounds(p)
+                    if (rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) copyComments(s.items)
+                    return
+                }
                 val c = (p.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? VettyStateService.Comment ?: return
                 // Inline row button hit? (Copy / Delete icons sit at the left, before the text)
                 val rb = commentTree.getPathBounds(p)
@@ -505,9 +533,13 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                 var hand = false
                 val row = commentTree.getRowForLocation(e.x, e.y)
                 if (row >= 0) {
-                    val c = (commentTree.getPathForRow(row)?.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? VettyStateService.Comment
+                    val obj = (commentTree.getPathForRow(row)?.lastPathComponent as? DefaultMutableTreeNode)?.userObject
+                    val c = obj as? VettyStateService.Comment
                     val rb = commentTree.getRowBounds(row)
-                    if (c != null && rb != null && e.x >= rb.x && e.x < rb.x + 2 * ROW_ICON) {
+                    if (obj is SectionNode && rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) {
+                        hand = true
+                        tip = "Copy all ${obj.title.lowercase()}"
+                    } else if (c != null && rb != null && e.x >= rb.x && e.x < rb.x + 2 * ROW_ICON) {
                         hand = true
                         tip = commentActions(c)[((e.x - rb.x) / ROW_ICON).coerceIn(0, 1)].second
                     }
@@ -622,22 +654,36 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         if (tree.selectionPaths?.contains(path) != true) tree.selectionPath = path  // right-click outside selection → reselect
         if (selectedFiles().isEmpty()) return
         val inUntracked = activeFile()?.group == Group.UNTRACKED
+        // Whole selection: single file → in-place preview; several → pinned tabs for each.
+        val openDiff = simpleAction("Open Diff") {
+            val sel = selectedFiles()
+            if (sel.size == 1) showPreview(sel[0].rel) else sel.forEach { svc.openDiffPinned(it) }
+        }
+        val openFile = simpleAction("Open File") { selectedFiles().forEach { svc.openFile(it.rel) } }
         val group = DefaultActionGroup().apply {
-            if (!inUntracked) {
-                add(simpleAction(viewLabel(activeFile()?.group == Group.VIEWED)) { toggleViewedSelected() })
+            if (inUntracked) {
+                // Track / — / opens / — / Revert Changes
+                add(simpleAction("Track") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
+                addSeparator()
+                add(openDiff); add(openFile)
+                addSeparator()
+                add(simpleAction("Revert Changes…") { confirmRevert(selectedFiles()) })
+            } else {
+                // View/Unview + opens / — / Stage↔Unstage + reverts / — / Untrack
+                add(simpleAction(viewLabel(activeFile())) { toggleViewedSelected() })
+                add(openDiff); add(openFile)
+                addSeparator()
+                val af = activeFile()
+                val staged = af?.stageMark?.isNotEmpty() == true
+                if (staged || af?.clean != true) add(simpleAction(if (staged) "Unstage" else "Stage") {
+                    val sel = selectedFiles()
+                    offEdt(after = { reload() }) { sel.forEach { if (staged) svc.unstageFile(it.rel) else svc.stageFile(it.rel) } }
+                })
+                add(simpleAction("Revert to Last Viewed…") { confirmRevertToViewed(selectedFiles()) })
+                if (af?.clean != true) add(simpleAction("Revert Changes…") { confirmRevert(selectedFiles()) })
+                addSeparator()
+                add(simpleAction("Untrack") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
             }
-            // Whole selection: single file → in-place preview; several → pinned tabs for each.
-            add(simpleAction("Open Diff") {
-                val sel = selectedFiles()
-                if (sel.size == 1) showPreview(sel[0].rel) else sel.forEach { svc.openDiffPinned(it) }
-            })
-            add(simpleAction("Open File") { selectedFiles().forEach { svc.openFile(it.rel) } })
-            addSeparator()
-            add(simpleAction("Revert to Last Viewed…") { confirmRevertToViewed(selectedFiles()) })
-            add(simpleAction("Revert Changes…") { confirmRevert(selectedFiles()) })
-            addSeparator()   // Track/Untrack stays the bottom entry
-            if (inUntracked) add(simpleAction("Track") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
-            else add(simpleAction("Untrack") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
         }
         com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
             null, group, com.intellij.ide.DataManager.getInstance().getDataContext(tree),
@@ -645,13 +691,22 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         ).show(com.intellij.ui.awt.RelativePoint(e))
     }
 
-    private fun selectedComments(): List<VettyStateService.Comment> =
-        commentTree.selectionPaths?.mapNotNull { (it.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? VettyStateService.Comment }
-            ?: emptyList()
+    private fun selectedComments(): List<VettyStateService.Comment> {
+        // A file header (or a whole section) stands for everything under it.
+        fun flat(n: DefaultMutableTreeNode): List<VettyStateService.Comment> =
+            (n.userObject as? VettyStateService.Comment)?.let { listOf(it) }
+                ?: (0 until n.childCount).flatMap { flat(n.getChildAt(it) as DefaultMutableTreeNode) }
+        return commentTree.selectionPaths?.flatMap { flat(it.lastPathComponent as DefaultMutableTreeNode) }?.distinct() ?: emptyList()
+    }
 
-    private fun copyComments(list: List<VettyStateService.Comment>) =
-        CopyPasteManager.getInstance().setContents(  // bullet format, same as VS Code's copy-comment
-            StringSelection(VettyParse.exportComments(list).split("\n").joinToString("\n") { "- $it" }))
+    private fun copyComments(list: List<VettyStateService.Comment>) {
+        val (ai, mine) = list.partition { it.ai }
+        // Yours: bullet format, same as VS Code's copy-comment.
+        val bullets = if (mine.isEmpty()) "" else VettyParse.exportComments(mine).split("\n").joinToString("\n") { "- $it" }
+        // Claude notes are multi-line markdown (bullets, tables) — keep their shape under a file:line heading.
+        val blocks = ai.joinToString("\n\n") { "### ${it.file}:${it.line + 1}${if (it.big) " (big picture)" else ""}\n\n${it.body}" }
+        CopyPasteManager.getInstance().setContents(StringSelection(listOf(bullets, blocks).filter { it.isNotEmpty() }.joinToString("\n\n") + "\n"))
+    }
 
     /** Right-click a TODO (or several) in the TODOs pane → Go to / Copy. */
     private fun todoPopup(e: MouseEvent) {
@@ -681,19 +736,26 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         if (commentTree.selectionPaths?.contains(p) != true) commentTree.selectionPath = p  // right-click outside selection → reselect
         val sel = selectedComments()
         if (sel.isEmpty()) return
-        val group = DefaultActionGroup().apply {
+        val section = (p.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? SectionNode
+        val group = if (section != null) DefaultActionGroup().apply {   // header: whole-section actions
+            add(simpleAction("Copy all") { copyComments(section.items) })
+            if (section.title == "Guided review") add(simpleAction("Clear guided review") {
+                if (Messages.showYesNoDialog(project, "Clear the guided review? This deletes Claude's review order and all its notes (in both editors).",
+                        "Vetty: Clear Guided Review", "Clear", "Cancel", null) == Messages.YES && svc.clearGuidedReview()) svc.refreshUiAndGutters()
+            })
+        } else DefaultActionGroup().apply {
             if (sel.size == 1) {
                 val c = sel[0]
                 add(simpleAction("Go to") { svc.openTodo(c.file, c.line + 1) })
-                add(simpleAction("Edit") {
+                if (!c.ai) add(simpleAction("Edit") {   // Claude notes are read-only (delete only)
                     Messages.showInputDialog(project, "Comment", "Edit Comment", null, c.body, null)
                         ?.let { c.body = it; svc.refreshUiAndGutters() }
                 })
                 add(simpleAction("Copy") { copyComments(sel) })
-                add(simpleAction("Delete") { svc.deleteComment(c); svc.refreshUiAndGutters() })
+                add(simpleAction("Delete") { svc.deleteAnyComments(listOf(c)); svc.refreshUiAndGutters() })
             } else {
                 add(simpleAction("Copy ${sel.size}") { copyComments(sel) })
-                add(simpleAction("Delete ${sel.size}") { sel.forEach { svc.deleteComment(it) }; svc.refreshUiAndGutters() })
+                add(simpleAction("Delete ${sel.size}") { svc.deleteAnyComments(sel); svc.refreshUiAndGutters() })
             }
         }
         com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
@@ -820,7 +882,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
      *  on big repos). [onDone] runs on the EDT after the tree has rebuilt. */
     fun reload(onDone: (() -> Unit)? = null) {
         ApplicationManager.getApplication().executeOnPooledThread {
-            val files = svc.load(); val todos = svc.todos(); val comments = svc.allComments()
+            val files = svc.load(); val todos = svc.todos(); val comments = svc.allComments() + svc.aiComments()
             ApplicationManager.getApplication().invokeLater({
                 rebuild(files, todos, comments)
                 // Comments are branch-scoped: after a checkout the open editors keep the old branch's
@@ -847,7 +909,10 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private fun rebuild(files: List<VFile>, todos: List<Todo>, comments: List<VettyStateService.Comment>) {
         lastTodos = todos; lastComments = comments
         allFiles = files
-        val shown = applyFilters(files)
+        // Claude's review order (toggle on): listed files first, in order — nav/advance follow it too.
+        val shown = applyFilters(files).let { l ->
+            if (svc.guidedReview()) l.sortedBy { svc.orderStep(it.rel)?.first ?: Int.MAX_VALUE } else l
+        }
         current = shown   // nav/advance/select stay within the filtered slice, like VS Code
         val root = DefaultMutableTreeNode()
         val groupNodes = HashMap<Group, DefaultMutableTreeNode>()
@@ -872,14 +937,10 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         val shownRels = shown.map { it.rel }.toHashSet()
         val shownTodos = todos.filter { it.rel in shownRels }
         visibleTodos = shownTodos   // for the Export TODOs toolbar action
-        val todoRoot = DefaultMutableTreeNode()
-        shownTodos.forEach { todoRoot.add(DefaultMutableTreeNode(it)) }
-        todoTree.model = DefaultTreeModel(todoRoot)
+        groupByFile(todoTree, shownTodos) { it.rel }
         todoCount = shownTodos.size
 
-        val commentRoot = DefaultMutableTreeNode()
-        comments.forEach { commentRoot.add(DefaultMutableTreeNode(it)) }
-        commentTree.model = DefaultTreeModel(commentRoot)
+        buildComments(comments)
         commentCount = comments.size
         reviewCount = shown.size
         updateSectionTitles()
@@ -911,6 +972,43 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         } else if (shown.isEmpty()) {
             tree.emptyText.text = "No files match the filter"
         }
+    }
+
+    /** Comments pane: your comments and Claude's guided-review notes as two collapsible sections
+     *  (collapse "Guided review" to see only yours). No Claude notes → the plain per-file list. */
+    private fun buildComments(comments: List<VettyStateService.Comment>) {
+        val (ai, mine) = comments.partition { it.ai }
+        if (ai.isEmpty()) { groupByFile(commentTree, mine) { it.file }; return }
+        val root = DefaultMutableTreeNode()
+        for ((title, list) in listOf("Comments" to mine, "Guided review" to ai)) {
+            val sn = DefaultMutableTreeNode(SectionNode(title, list.size, list))
+            for ((rel, l) in list.groupBy { it.file }) {
+                val fn = DefaultMutableTreeNode(FileHeader(rel, l.size))
+                l.forEach { fn.add(DefaultMutableTreeNode(it)) }
+                sn.add(fn)
+            }
+            root.add(sn)
+        }
+        commentTree.model = DefaultTreeModel(root)
+        for (i in 0 until root.childCount) {
+            val sn = root.getChildAt(i) as DefaultMutableTreeNode
+            if ((sn.userObject as SectionNode).title in collapsedSections) continue
+            commentTree.expandPath(TreePath(sn.path))
+            for (j in 0 until sn.childCount) commentTree.expandPath(TreePath((sn.getChildAt(j) as DefaultMutableTreeNode).path))
+        }
+    }
+
+    /** TODO / comment list: one expanded header row per file, entries beneath — so each entry shows
+     *  which file it's on. ponytail: a rebuild re-expands every header; remember collapsed ones if it bothers. */
+    private fun <T> groupByFile(t: JTree, items: List<T>, relOf: (T) -> String) {
+        val root = DefaultMutableTreeNode()
+        for ((rel, list) in items.groupBy(relOf)) {
+            val fn = DefaultMutableTreeNode(FileHeader(rel, list.size))
+            list.forEach { fn.add(DefaultMutableTreeNode(it)) }
+            root.add(fn)
+        }
+        t.model = DefaultTreeModel(root)
+        for (i in 0 until root.childCount) t.expandPath(TreePath((root.getChildAt(i) as DefaultMutableTreeNode).path))
     }
 
     /** Build a nested folder hierarchy for [files] under [parent], splitting rels on '/'. */
@@ -1064,6 +1162,24 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         override fun actionPerformed(e: AnActionEvent) { svc.toggleSinceReview(); reload() }
     }
 
+    /** Guided Review: on = Claude's review order (#n + why) + Claude's notes; off = path order, no Claude notes. */
+    private inner class GuidedReviewAction :
+        ToggleAction("Guided Review", "Claude's review order and context notes (off: path order, no Claude notes)", AllIcons.ObjectBrowser.Sorted) {
+        override fun getActionUpdateThread() = ActionUpdateThread.EDT
+        override fun isSelected(e: AnActionEvent) = svc.guidedReview()
+        override fun setSelected(e: AnActionEvent, state: Boolean) {
+            svc.toggleGuidedReview()
+            if (state && !svc.hasReviewOrder() && svc.aiComments().isEmpty())
+                Messages.showInfoMessage(project, svc.claudeReviewFileBranch().let { other ->
+                    if (other.isNotEmpty() && other != svc.currentBranchName())
+                        "The guided review on disk is for \"$other\" — you're on \"${svc.currentBranchName()}\".\nAsk Claude to \"annotate this branch for Vetty\"."
+                    else "No guided review for this branch yet.\nAsk Claude to \"annotate this branch for Vetty\"."
+                }, "Vetty")
+            svc.refreshUiAndGutters()   // gutter notes appear / disappear
+            reload()
+        }
+    }
+
     private inner class ExportTodosAction :
         UiAction("Export TODOs", "Copy all shown TODOs as file:line — text", AllIcons.Actions.Copy) {
         override fun actionPerformed(e: AnActionEvent) {
@@ -1100,6 +1216,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             val acts = when (obj) {
                 is VFile -> fileActions(obj)
                 is VettyStateService.Comment -> commentActions(obj)
+                is SectionNode -> listOf(Triple(AllIcons.Actions.Copy, "Copy all") { copyComments(obj.items) })
                 is Todo -> todoActions(obj)
                 else -> return comp
             }
@@ -1165,6 +1282,18 @@ private class VettyTextRenderer(
                 icon = AllIcons.Nodes.Folder
                 append(obj.name)
             }
+            is SectionNode -> {
+                icon = if (obj.title == "Guided review") AllIcons.Actions.IntentionBulb else AllIcons.General.Balloon
+                append("${obj.title} (${obj.count})", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+            }
+            is FileHeader -> {
+                val name = obj.rel.substringAfterLast('/')
+                icon = FileTypeManager.getInstance().getFileTypeByFileName(name).icon
+                append(name)
+                val dir = obj.rel.substringBeforeLast('/', "")
+                append("   ${listOf(dir, obj.count.toString()).filter { it.isNotEmpty() }.joinToString("  ·  ")}",
+                    SimpleTextAttributes.GRAYED_ATTRIBUTES)
+            }
             is Match -> {
                 icon = AllIcons.Actions.Find
                 append("${obj.line}: ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
@@ -1175,13 +1304,15 @@ private class VettyTextRenderer(
                     .replace(Regex("""^\s*(/{2,}|#+|/\*+|\*+|<!--|--)\s?"""), "")
                     .replace(Regex("""\s*(\*/|-->)\s*$"""), "").trim().ifEmpty { obj.text }
                 append(msg)
-                append("   ${obj.rel.substringAfterLast('/')}:${obj.line}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                append("   :${obj.line}", SimpleTextAttributes.GRAYED_ATTRIBUTES)   // the file is the parent row
             }
             is VettyStateService.Comment -> {
-                icon = AllIcons.General.Balloon
-                append(obj.body)
+                icon = if (obj.ai) AllIcons.Actions.IntentionBulb else AllIcons.General.Balloon
+                // Claude notes are multi-line markdown — the row shows the first line, bullet stripped.
+                append(if (!obj.ai) obj.body else obj.body.lines()
+                    .map { it.replace(Regex("^\\s*([-*+]|\\d+\\.|\\|)\\s*"), "").trim() }.firstOrNull { it.isNotEmpty() } ?: "")
                 val loc = if (obj.span > 0) "${obj.line + 1}-${obj.line + obj.span + 1}" else "${obj.line + 1}"
-                append("   ${obj.file.substringAfterLast('/')}:$loc", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                append("   :$loc${if (obj.big) "  ·  big picture" else ""}", SimpleTextAttributes.GRAYED_ATTRIBUTES)   // section says Claude
             }
             is VFile -> {
                 val name = obj.rel.substringAfterLast('/')
@@ -1193,15 +1324,21 @@ private class VettyTextRenderer(
                 // Leading stage marker: `*` staged, `^` staged but edited since staging.
                 val stage = if (obj.stageMark.isEmpty()) "" else "${obj.stageMark} "
                 append(stage + name, SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, color))  // filename colored by status
+                val step = svc.orderStep(obj.rel)   // Claude's review order: #n + one-line why
                 val extras = buildList {
+                    if (step != null) add("#${step.first}")   // already 1-based, gap-free
                     val mc = matchCount(obj.rel)
                     if (mc > 0) add("$mc match${if (mc == 1) "" else "es"}")
                     if (obj.add > 0 || obj.del > 0) add("+${obj.add} −${obj.del}")
+                    if (obj.wtOnly) add("uncommitted only")   // not in the branch diff — the working tree undoes a commit
                     if (dir.isNotEmpty() && !svc.nested()) add(dir)   // folders show the path in tree mode
                 }
                 if (extras.isNotEmpty()) append("   ${extras.joinToString("  ·  ")}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 val n = svc.commentsFor(obj.rel).size
                 if (n > 0) append("  💬$n", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                // ↻ = viewed before, edited since — a re-review, not a first look (snapshot restorable).
+                if (obj.group == Group.UNVIEWED && svc.hasSnapshot(obj.rel))
+                    append("  ↻ since view", SimpleTextAttributes.GRAYED_ATTRIBUTES)
             }
         }
     }
@@ -1227,9 +1364,9 @@ object VettyGutter {
         val persist = realFile != null && svc.relPath(realFile) == rel
         val doc = editor.document
         val lines = doc.text.split("\n")
-        for (c in svc.commentsFor(rel)) {
+        for (c in svc.commentsFor(rel) + svc.aiCommentsFor(rel)) {
             val line = VettyParse.reanchor(lines, c.line, c.anchor)
-            if (persist && line != c.line) c.line = line   // persist drift only from the real file
+            if (persist && !c.ai && line != c.line) c.line = line   // persist drift only from the real file (never Claude's file)
             if (line < doc.lineCount) {
                 val end = (line + c.span).coerceIn(line, doc.lineCount - 1)
                 val attrs = TextAttributes().apply { backgroundColor = COMMENT_BG }  // shade the spanned lines
@@ -1252,14 +1389,16 @@ object VettyGutter {
 
 private class VettyGutterIcon(private val project: Project, val c: VettyStateService.Comment) :
     GutterIconRenderer() {
-    override fun getIcon() = AllIcons.General.Balloon
-    override fun getTooltipText() = c.body
+    override fun getIcon() = if (c.ai) AllIcons.Actions.IntentionBulb else AllIcons.General.Balloon
+    // Claude notes are markdown (bullets, tables): monospace keeps table columns aligned.
+    override fun getTooltipText() = if (!c.ai) c.body
+        else "<html><b>Claude${if (c.big) " · big picture" else ""}</b>${VettyParse.mdToHtml(c.body)}</html>"
     override fun isNavigateAction() = true
     override fun getClickAction(): AnAction = object : AnAction() {
         override fun actionPerformed(e: AnActionEvent) {
             val svc = project.service<VettyService>()
             val group = DefaultActionGroup().apply {
-                add(object : AnAction("Edit") {
+                if (!c.ai) add(object : AnAction("Edit") {
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT
                     override fun actionPerformed(ev: AnActionEvent) =
                         Messages.showInputDialog(project, "Comment", "Edit Comment", null, c.body, null)
@@ -1272,7 +1411,7 @@ private class VettyGutterIcon(private val project: Project, val c: VettyStateSer
                 })
                 add(object : AnAction("Delete") {
                     override fun getActionUpdateThread() = ActionUpdateThread.EDT
-                    override fun actionPerformed(ev: AnActionEvent) { svc.deleteComment(c); svc.refreshUiAndGutters() }
+                    override fun actionPerformed(ev: AnActionEvent) { svc.deleteAnyComments(listOf(c)); svc.refreshUiAndGutters() }
                 })
             }
             com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
@@ -1283,6 +1422,20 @@ private class VettyGutterIcon(private val project: Project, val c: VettyStateSer
     }
     override fun equals(other: Any?) = other is VettyGutterIcon && other.c === c
     override fun hashCode() = System.identityHashCode(c)
+}
+
+/** Find Action → "Vetty: Clear Guided Review": deletes Claude's review order + notes for this worktree. */
+class VettyClearGuidedReviewAction : AnAction() {
+    override fun getActionUpdateThread() = ActionUpdateThread.BGT
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val svc = project.service<VettyService>()
+        if (Messages.showYesNoDialog(project,
+                "Clear the guided review? This deletes Claude's review order and all its notes (in both editors).",
+                "Vetty: Clear Guided Review", "Clear", "Cancel", null) != Messages.YES) return
+        if (!svc.clearGuidedReview()) { Messages.showInfoMessage(project, "No guided review to clear.", "Vetty"); return }
+        svc.refreshUiAndGutters()   // notes leave the gutter + list; order drops from the tree
+    }
 }
 
 class VettyAddCommentAction : AnAction() {

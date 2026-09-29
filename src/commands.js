@@ -11,7 +11,7 @@ const {
   MAX_REL_BRANCHES, PARENT_MAX_AHEAD, MAX_OPEN_WITHOUT_CONFIRM, FOLDER_KEY,
   workspaceFolderPath, resolveRepoRoot, watchGitDir, detectGh, hashCache, baseUriFor,
 } = core;
-const { openOneDiff, openReviewFile } = require('./tree');
+const { openOneDiff, openReviewFile, atFirstComment } = require('./tree');
 
 /** Multi-root: pick which workspace folder Vetty reviews. Remembered per workspace. */
 async function pickFolder(context) {
@@ -310,7 +310,7 @@ async function treeOpenFile(item, sel) {
   const preview = rels.length === 1 ? clickPreview(rels[0]) : false; // multiple → keep them all open
   await Promise.all(
     rels.map((rel) =>
-      vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), { preview, preserveFocus: !preview })
+      vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), atFirstComment(app.context, rel, { preview, preserveFocus: !preview }))
     )
   );
 }
@@ -372,6 +372,19 @@ async function stageFiles(context, item, sel) {
     return;
   }
   vscode.window.setStatusBarMessage(`Staged ${rels.length} file(s). Commit in Source Control.`, 2500);
+}
+
+async function unstageFiles(context, item, sel) {
+  const cwd = getCwd();
+  const rels = selectedRels(item, sel);
+  if (!cwd || !rels.length) return;
+  try {
+    for (let i = 0; i < rels.length; i += 100) await git(cwd, ['restore', '--staged', '--', ...rels.slice(i, i + 100)]);
+  } catch (e) {
+    vscode.window.showErrorMessage(`git restore --staged failed: ${e.message}`);
+    return;
+  }
+  vscode.window.setStatusBarMessage(`Unstaged ${rels.length} file(s).`, 2500);
 }
 
 /** Assign the selected file(s) to a group (pick an existing one or name a new one). */
@@ -506,8 +519,15 @@ async function revertFiles(context, item, sel) {
   const rels = selectedRels(item, sel);
   if (!cwd || !rels.length) return;
   const what = rels.length === 1 ? `"${rels[0]}"` : `${rels.length} files`;
+  // Name the deletions only when the selection actually holds untracked files. Warning about
+  // deletion every time trains the user to skim past it, so it stops carrying weight on the runs
+  // where a file really does get deleted rather than reverted.
+  const untracked = rels.filter((r) => app.diffTree?.status.get(r) === 'U').length;
+  const delNote = untracked
+    ? ` ${untracked === 1 ? '1 untracked file' : `${untracked} untracked files`} will be DELETED.`
+    : '';
   const ok = await vscode.window.showWarningMessage(
-    `Discard changes to ${what}? Untracked files will be deleted. This cannot be undone.`,
+    `Discard changes to ${what}?${delNote} This cannot be undone.`,
     { modal: true },
     'Discard'
   );
@@ -666,7 +686,7 @@ module.exports = {
   pickFolder, pickBranch, changedFiles, openFiles, openAll, openByViewed,
   applyViewed, clearViewed, selectedRels, copyPaths,
   treeOpenFile, treeOpenDiff, treeSetViewed, treeSetIgnored,
-  stageViewed, stageFiles, addToGroup, removeFromGroup,
+  stageViewed, stageFiles, unstageFiles, addToGroup, removeFromGroup,
   stageGroup, markGroupViewed, openGroup, ungroup, clearGroups,
   revertFiles, revertToViewed, toggleStageOnView, fetchAndRefresh, treeOpenGroup, treeMarkAllViewed, treeMarkAllUnviewed,
   treePickBranch, treeOpenUnviewed,

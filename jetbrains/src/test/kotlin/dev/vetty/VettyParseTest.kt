@@ -45,6 +45,31 @@ class VettyParseTest {
         assertEquals("// TODO fix this", todos[0].third)
     }
 
+    // Identifiers like %TEMP% / $env:TEMP / `TEMP` in prose flooded the TODO list (real false positives).
+    @Test fun todoRe_needsCommentLeaderOrLabel() {
+        for (s in listOf("%TEMP%\\logs\\x.log", "# Spelled the long way: \$env:TEMP is short", "\$env:TEMP = \$Shell",
+            "shell whose `TEMP` is the 8.3 spelling", "# child: TEMP spelled as asked", "a * TEMP_FACTOR"))
+            assertEquals(s, false, VettyParse.TODO_RE.containsMatchIn(s))
+        for (s in listOf("// TODO fix", "# FIXME: x", "/* HACK */", " * NOTE: y", "<!-- WIP -->", "x(); // TODO(rob): later", "- NOTE: md"))
+            assertEquals(s, true, VettyParse.TODO_RE.containsMatchIn(s))
+        assertEquals(8, VettyParse.todoCol("x(); // TODO: y"))
+    }
+
+    // Claude review file: branch-scoped, repo→project prefix mapped, order dedup + notes, 1→0-based lines.
+    @Test fun claudeReview_parsesAndDeletes() {
+        val text = """{"branch":"feat","order":["sub/a.kt",{"file":"sub/b.kt","note":"callers"},"sub/a.kt","other/x.kt"],
+            "comments":[{"file":"sub/a.kt","line":3,"endLine":5,"anchor":" val x = 1 ","body":"- why"},
+                        {"file":"sub/a.kt","line":0,"body":"bad"}]}"""
+        assertEquals(null, VettyParse.parseClaudeReview(text, "other", "sub/"))
+        val r = VettyParse.parseClaudeReview(text, "feat", "sub/")!!
+        assertEquals(mapOf("a.kt" to (0 to ""), "b.kt" to (1 to "callers")), r.order)   // other/ is outside the project
+        assertEquals(1, r.comments.size)
+        val c = r.comments[0]
+        assertEquals(listOf("a.kt", 2, 2, "val x = 1", true), listOf(c.file, c.line, c.span, c.anchor, c.ai))
+        val left = VettyParse.parseClaudeReview(VettyParse.removeClaudeComments(text, r.comments, "sub/"), "feat", "sub/")!!
+        assertEquals(0, left.comments.size)
+    }
+
     @Test fun exportComments_formatsFileLineBody() {
         val c = VettyStateService.Comment().apply { file = "src/a.kt"; line = 4; body = "fix this" }
         assertEquals("src/a.kt:5 — fix this", VettyParse.exportComments(listOf(c)))

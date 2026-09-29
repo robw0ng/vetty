@@ -36,7 +36,9 @@ enum class Group { UNVIEWED, VIEWED, UNTRACKED }
 
 data class VFile(val rel: String, val status: String, val add: Int, val del: Int, val group: Group,
                  val wsOnly: Boolean = false,   // whitespace-only change (set while the hide-whitespace toggle is on)
-                 val stageMark: String = "")    // "*" staged, "^" staged but edited since, "" unstaged
+                 val stageMark: String = "",    // "*" staged, "^" staged but edited since, "" unstaged
+                 val clean: Boolean = false,    // no uncommitted changes (committed) — Stage/&-Stage/Revert Changes are no-ops
+                 val wtOnly: Boolean = false)   // branch range: not in the branch diff, only vs HEAD (committed, then undone)
 
 data class Todo(val rel: String, val line: Int, val text: String)
 
@@ -45,7 +47,7 @@ data class Todo(val rel: String, val line: Int, val text: String)
 class VettyService(private val project: Project, private val cs: CoroutineScope) {
 
     companion object {
-        val TODO_RE = Regex("""\b(TODO|FIXME|HACK|XXX|BUG|NOTE|OPTIMIZE|REVIEW|WIP|TEMP|REFACTOR|DEPRECATED)\b""")
+        val TODO_RE = VettyParse.TODO_RE   // comment-leader / `LABEL:` only — see VettyParse
         val TRUNKS = listOf("main", "master", "develop", "dev", "trunk")
         const val PARENT_MAX_AHEAD = 500   // beyond this an "ancestor" is an old merged branch, not a base
 
@@ -147,6 +149,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     private fun resolveBase() {
         val cur = currentBranch() ?: return
+        if (cur != curBranch) inheritBranchState(cur)   // checkout -b continuation: child inherits marks
         curBranch = cur   // viewed/ignored keys hang off this
         if (!pruned) { pruned = true; pruneStale(branches()) }   // GC once per project open
         var b = state.baseByBranch[cur]
@@ -160,6 +163,44 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         if (b == null) b = inferClosestAncestor(cur)
         state.baseByBranch[cur] = b
         state.base = b
+    }
+
+    /** checkout -b continuation: marks are branch-keyed, so a new child branch starts empty even
+     *  though its content is identical to what was just reviewed. On switching to [cur]: find the
+     *  branch we came from in the HEAD reflog (restart-safe), and if [cur] descends from its tip
+     *  (merge-base == tip — exactly what checkout -b produces) and has no marks of its own yet,
+     *  copy the parent's review state over. Hash-gating keeps it honest; never fires INTO a trunk
+     *  (feature→master after a merge would pollute it); never overwrites existing marks. */
+    private fun inheritBranchState(cur: String) {
+        try {
+            if (cur in TRUNKS) return
+            val curHas = state.viewed.keys.any { it.startsWith("$cur\t") } ||
+                state.ignored.any { it.startsWith("$cur\t") } ||
+                state.comments.any { it.branch == cur }
+            if (curHas) return   // never overwrite existing state
+            // Newest "checkout: moving from A to B" in the reflog tells us the parent candidate.
+            val re = Regex("^checkout: moving from (\\S+) to (\\S+)")
+            val m = git("reflog", "HEAD", "-n", "30", "--format=%gs").split("\n")
+                .firstNotNullOfOrNull { re.find(it) } ?: return
+            val (prev, to) = m.destructured
+            if (to != cur || prev == cur) return
+            val prevViewed = state.viewed.filterKeys { it.startsWith("$prev\t") }
+            if (prevViewed.isEmpty()) return
+            val prevTip = git("rev-parse", "--verify", prev).trim()
+            if (prevTip.isEmpty() || git("merge-base", prev, cur).trim() != prevTip) return
+            for ((k, v) in prevViewed) state.viewed["$cur\t${k.substringAfter('\t')}"] = v
+            state.ignored.filter { it.startsWith("$prev\t") }
+                .forEach { state.ignored.add("$cur\t${it.substringAfter('\t')}") }
+            state.comments.filter { it.branch == prev }.forEach { c ->
+                state.comments.add(VettyStateService.Comment().apply {
+                    file = c.file; line = c.line; span = c.span; anchor = c.anchor; body = c.body; branch = cur
+                })
+            }
+            scheduleSave()
+            dbg { "inherited review state $prev → $cur" }
+        } catch (e: Exception) {
+            dbg { "inherit skipped: ${e.message}" }
+        }
     }
 
     /** Run [work] per item on the pooled executor and wait — parallel git spawns, not one-by-one. */
@@ -289,8 +330,37 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     /** Compact status text, e.g. "range: whole branch · compare: last viewed". */
     fun diffStatus(): String {
         val r = if (isCommitRange()) "uncommitted" else "whole branch"
-        return "range: $r · compare: ${if (sinceReview()) "last viewed" else "base"}"
+        return "range: $r · compare: ${if (sinceReview()) "last viewed" else "base"}${guidedSummary()}"
     }
+
+    /** " · guided · 2h ago · 3 commits behind · 2 unannotated" ("" when off / none). */
+    fun guidedSummary(): String {
+        if (!state.guidedReview) return ""
+        val review = claudeReview() ?: return ""
+        val steps = steps()
+        if (steps.isEmpty()) return ""
+        val missing = reviewRels.count { it !in steps && !isIgnored(it) }
+        val behind = guidedBehind
+        return listOf(
+            " · guided",
+            VettyParse.ago(review.writtenAt),
+            if (behind != null && behind > 0) "$behind commit${if (behind == 1) "" else "s"} behind" else "",
+            if (missing > 0) "$missing unannotated" else "",
+        ).filter { it.isNotEmpty() }.joinToString(" · ")
+    }
+
+    /** Commits since the review's recorded HEAD (null = unknown / none). One rev-list per load, only while on. */
+    @Volatile private var guidedBehind: Int? = null
+    private fun refreshGuidedBehind() {
+        val head = (if (state.guidedReview) claudeReview()?.head else null) ?: run { guidedBehind = null; return }
+        guidedBehind = git("rev-list", "--count", "$head..HEAD").trim().toIntOrNull()
+    }
+
+    /** Branch named inside the review file, whatever branch we're on (for the "annotated for X" message). */
+    fun claudeReviewFileBranch(): String = try {
+        com.google.gson.JsonParser.parseString(claudeFile()!!.readText()).asJsonObject.get("branch")?.asString ?: ""
+    } catch (e: Exception) { "" }
+    fun currentBranchName(): String? = curBranch
 
     private var baseRefCache: Pair<String, String>? = null  // base → merge-base ref; recomputed once per reload
 
@@ -329,12 +399,145 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     @Volatile private var curBranch: String? = null
     private fun key(rel: String) = "${curBranch ?: base()}\t$rel"
 
+    // --- Claude review file: any Claude session (vetty-review skill) writes an intuitive review order
+    // and short context notes to <git-dir>/vetty/claude-review.json; both editors read it. ---------
+    @Volatile private var gitDirCache: String? = null   // resolved off-EDT in load(); renderers only stat
+    @Volatile private var prefixCache: String = ""      // repo-root → project-relative (--show-prefix)
+    private fun claudeFile(): java.io.File? = gitDirCache?.let { java.io.File(it, "vetty/claude-review.json") }
+    private var claudeKey: String? = null
+    private var claudeVal: VettyParse.ClaudeReview? = null
+
+    /** Parsed review for the current branch (re-read only when the file or branch changes). */
+    @Synchronized fun claudeReview(): VettyParse.ClaudeReview? {
+        val f = claudeFile()
+        val key = if (f != null && f.isFile) "${f.lastModified()}:${f.length()}:$curBranch" else null
+        if (key != claudeKey) {
+            claudeVal = if (key == null) null
+                else try { VettyParse.parseClaudeReview(f!!.readText(), curBranch, prefixCache) } catch (e: Exception) { null }
+            claudeKey = key
+        }
+        return claudeVal
+    }
+
+    /** Claude context notes — read-only context, NOT change requests (never gate stage-on-view). */
+    // Guided Review off → hidden. Only notes on files in this review: a note on a file Vetty doesn't
+    // list has no row to belong to (Claude annotated outside the scope).
+    fun aiComments(): List<VettyStateService.Comment> =
+        if (!state.guidedReview) emptyList() else claudeReview()?.comments?.filter { it.file in reviewRels } ?: emptyList()
+    fun aiCommentsFor(rel: String) = aiComments().filter { it.file == rel }
+
+    /** Delete comments of either kind: Claude notes leave the shared review file; local ones leave state. */
+    fun deleteAnyComments(list: List<VettyStateService.Comment>) {
+        val (ai, local) = list.partition { it.ai }
+        local.forEach { deleteComment(it) }
+        val f = claudeFile()
+        if (ai.isEmpty() || f == null) return
+        try { f.writeText(VettyParse.removeClaudeComments(f.readText(), ai, prefixCache)) }
+        catch (e: Exception) { com.intellij.openapi.diagnostic.Logger.getInstance("#dev.vetty").warn("could not update ${f.path}", e) }
+    }
+
+    /** Delete the guided review file (Claude's order + all its notes) — shared, so both editors clear.
+     *  false = nothing to clear. */
+    fun clearGuidedReview(): Boolean {
+        val f = claudeFile() ?: return false
+        return f.isFile && f.delete()
+    }
+
+    fun guidedReview(): Boolean = state.guidedReview
+    fun toggleGuidedReview() { state.guidedReview = !state.guidedReview; scheduleSave() }
+    fun hasReviewOrder(): Boolean = claudeReview()?.order?.keys?.any { it in reviewRels } == true
+    /** (index, note) while the sort toggle is on and Claude listed [rel]; else null. */
+    fun orderStep(rel: String): Pair<Int, String>? = steps()[rel]
+
+    /** Guided Review steps: Claude's order restricted to files in this review (out-of-diff and Untracked
+     *  entries dropped), renumbered 1..n so the #s have no gaps. rel → (n, note). ponytail: recomputed
+     *  per call — the order list is short. */
+    fun steps(): Map<String, Pair<Int, String>> {
+        if (!state.guidedReview) return emptyMap()
+        val order = claudeReview()?.order ?: return emptyMap()
+        val m = LinkedHashMap<String, Pair<Int, String>>()
+        for ((rel, e) in order) if (rel in reviewRels && !isIgnored(rel)) m[rel] = (m.size + 1) to e.second
+        return m
+    }
+
+    @Volatile private var reviewRels: Set<String> = emptySet()   // files in the current review (set by load)
+    private var lastScope: String? = null
+
+    /** Publish Vetty's exact review set to <git-dir>/vetty/scope.json so a Claude session annotates what
+     *  Vetty lists, not its own guess at the diff. Repo-root-relative paths; written only on change. */
+    private fun writeScope(files: List<VFile>) {
+        val dir = gitDirCache ?: return
+        val j = com.google.gson.JsonObject().apply {
+            addProperty("note", "Written by Vetty: the files it lists for review. Annotate only these.")
+            addProperty("branch", curBranch)
+            addProperty("base", state.base)
+            addProperty("mergeBase", baseRef())
+            addProperty("range", range())
+            add("files", com.google.gson.JsonArray().also { a ->
+                files.filter { it.group != Group.UNTRACKED }.forEach { f ->
+                    a.add(com.google.gson.JsonObject().apply { addProperty("file", prefixCache + f.rel); addProperty("status", f.status) })
+                }
+            })
+        }
+        val text = com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(j) + "\n"
+        if (text == lastScope) return
+        try {
+            java.io.File(dir, "vetty").mkdirs()
+            java.io.File(dir, "vetty/scope.json").writeText(text)
+            lastScope = text
+        } catch (e: Exception) { dbg { "scope write failed: ${e.message}" } }
+    }
+
+    /** Poll the review file — external writes under .git get no VFS event. ponytail: 1.5s stat, cheap. */
+    fun startClaudeWatch() {
+        cs.launch {
+            var last: String? = null
+            while (true) {
+                kotlinx.coroutines.delay(1500)
+                val f = claudeFile() ?: continue
+                val stamp = if (f.isFile) "${f.lastModified()}:${f.length()}" else ""
+                if (last != null && stamp != last) {
+                    com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater { onChange?.invoke() }
+                    if (stamp.isNotEmpty()) announceGuided()   // a (re)annotation is easy to miss with the toggle off
+                }
+                last = stamp
+            }
+        }
+    }
+
+    /** Toggle off → balloon with a "Turn on" action (silent for another branch's file); on → quiet status line. */
+    private fun announceGuided() {
+        val forBranch = claudeReviewFileBranch()
+        val group = com.intellij.notification.NotificationGroupManager.getInstance().getNotificationGroup("Vetty")
+        if (!state.guidedReview) {
+            if (forBranch.isNotEmpty() && forBranch != curBranch) return
+            val n = group.createNotification("Guided review ready for ${forBranch.ifEmpty { "this branch" }}",
+                com.intellij.notification.NotificationType.INFORMATION)
+            n.addAction(com.intellij.notification.NotificationAction.createSimpleExpiring("Turn on") {
+                toggleGuidedReview(); refreshUiAndGutters()
+            })
+            n.notify(project)
+        } else {
+            val r = claudeReview() ?: return
+            val n = steps().size
+            group.createNotification("Guided review updated: $n file${if (n == 1) "" else "s"}, ${r.comments.size} notes",
+                com.intellij.notification.NotificationType.INFORMATION).notify(project)
+        }
+    }
+
+    /** Branch range: files changed vs HEAD but not vs the merge-base (committed, then undone). Set by load(). */
+    @Volatile private var wtOnlySet: Set<String> = emptySet()
+
     /** Full changed-file model, grouped Unviewed / Viewed / Untracked(= user-marked noise). */
     fun load(): List<VFile> {
         val t0 = System.currentTimeMillis()
         baseRefCache = null   // recompute merge-base once per refresh (cheap reuse across diff clicks)
         resolveBase()         // per-branch base memory + ancestor inference; re-resolves on branch switch
         purgeOnMergeBaseChange()
+        if (gitDirCache == null) {   // once: where Claude's review file lives + repo→project path prefix
+            prefixCache = git("rev-parse", "--show-prefix").trim()
+            gitDirCache = git("rev-parse", "--absolute-git-dir").trim().ifEmpty { null }
+        }
         val ref = listRef() ?: return emptyList()
         // All five git reads are independent — run them concurrently (sequential spawns made every
         // refresh, and the stage markers with it, noticeably slow). --relative scopes to the opened
@@ -361,6 +564,15 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         else null
         fun mark(rel: String) = if (rel in stagedSet) (if (rel in dirtySet) "^" else "*") else ""
         val nameStatus = VettyParse.parseNameStatus(outs[1])
+        // Branch range: a change committed and then undone in the working tree nets to zero vs the
+        // merge-base, so the branch diff drops the file — while the commit pane still lists it (it
+        // differs from HEAD). List those too, flagged uncommitted-only; their diff opens vs HEAD.
+        val inBranch = nameStatus.mapTo(HashSet()) { it.second }.apply { addAll(untrackedList) }
+        val wtCands = if (isCommitRange()) emptySet() else (stagedSet + dirtySet).filterTo(HashSet()) { it !in inBranch }
+        val headNs = if (wtCands.isEmpty()) emptyList()
+            else VettyParse.parseNameStatus(git("diff", "--relative", "--name-status", "HEAD")).filter { it.second in wtCands }
+        val headNums = if (headNs.isEmpty()) emptyMap() else VettyParse.parseNumstat(git("diff", "--relative", "--numstat", "HEAD"))
+        wtOnlySet = headNs.mapTo(HashSet()) { it.second }
         // Stage-on-view sync: staging outside vetty (commit pane) counts as a review too. Only
         // clean staged files (index == working tree) qualify — a stale-staged file's working
         // copy holds unreviewed edits.
@@ -380,7 +592,13 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             seen.add(rel)
             val (add, del) = nums[rel] ?: (0 to 0)
             files.add(VFile(rel, status, add, del, groupFor(rel),
-                wsOnly = real != null && status != "U" && rel !in real, stageMark = mark(rel)))
+                wsOnly = real != null && status != "U" && rel !in real, stageMark = mark(rel),
+                clean = status != "U" && rel !in stagedSet && rel !in dirtySet))
+        }
+        for ((status, rel) in headNs) {
+            seen.add(rel)
+            val (add, del) = headNums[rel] ?: (0 to 0)
+            files.add(VFile(rel, status, add, del, groupFor(rel), stageMark = mark(rel), wtOnly = true))
         }
         // Git-untracked NEW files are regular changes (status "U"); only user-untracked files go to Untracked.
         for (rel in untrackedList) {
@@ -388,7 +606,11 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             files.add(VFile(rel, "U", untrackedLineCount(rel), 0, groupFor(rel)))
         }
         dbg { "load done — ${System.currentTimeMillis() - t0}ms, ${files.size} files (base ${state.base})" }
-        return files.sortedBy { it.rel }
+        val result = files.sortedBy { it.rel }
+        reviewRels = result.filter { it.group != Group.UNTRACKED }.mapTo(HashSet()) { it.rel }
+        writeScope(result)
+        refreshGuidedBehind()
+        return result
     }
 
     // Line counts for untracked files (absent from `git diff --numstat`), cached by (mtime, size) so
@@ -547,7 +769,10 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             // Deletion tombstone ('D' — not a valid sha1): viewed while the file stays gone,
             // re-flags unviewed if it comes back.
             state.viewed[key(rel)] = "D\t"; scheduleSave(); blobCheck.remove(key(rel))
-            if (state.stageOnView && commentsFor(rel).isEmpty()) git("add", "--", rel)   // stages the deletion too
+            if (state.stageOnView) {
+                if (commentsFor(rel).isEmpty()) git("add", "--", rel)   // stages the deletion too
+                else notifyNotStaged(rel)
+            }
             return
         }
         val blob = git("hash-object", "-w", "--", rel).trim()   // snapshot blob for the since-review diff
@@ -557,14 +782,30 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         // Opt-in: reviewed ⇒ staged — but a file with open comments is "changes requested", so it
         // stays unstaged (staged = viewed ∧ no open comments). All markViewed callers already run
         // off the EDT, so the extra git spawn is safe here.
-        if (state.stageOnView && commentsFor(rel).isEmpty()) git("add", "--", rel)
+        if (state.stageOnView) {
+            if (commentsFor(rel).isEmpty()) git("add", "--", rel)
+            else notifyNotStaged(rel)
+        }
     }
+
+    /** Stage-on-view skipped a commented file — say so, or the missing `*` reads as a bug. */
+    private fun notifyNotStaged(rel: String) =
+        com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater {
+            com.intellij.openapi.wm.WindowManager.getInstance().getStatusBar(project)?.info =
+                "Vetty: ${rel.substringAfterLast('/')} viewed but NOT staged — open comments (💬)"
+        }
 
     fun unmarkViewed(rel: String) {
         if (state.viewed.remove(key(rel)) != null) scheduleSave()
         blobCheck.remove(key(rel))
         if (state.stageOnView) git("restore", "--staged", "--", rel)   // symmetric: unview ⇒ unstage
     }
+
+    /** Stage the file's current content (right-click Stage — no viewed-mark side effects). */
+    fun stageFile(rel: String) { git("add", "--", rel) }
+
+    /** Take the file out of the index (right-click Unstage — no viewed-mark side effects). */
+    fun unstageFile(rel: String) { git("restore", "--staged", "--", rel) }
 
     /** Discard a file's changes — restore to HEAD; untracked files are deleted. Caller confirms first. */
     fun revertFile(rel: String) {
@@ -709,7 +950,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         val hasReview = sinceReview() && blob != null && !isViewed(rel)  // overlay on + snapshot + changed since
         val (leftText, label) = when {
             hasReview -> git("cat-file", "-p", blob!!) to "last viewed"
-            isCommitRange() -> showBase("HEAD", rel) to "uncommitted"
+            isCommitRange() || rel in wtOnlySet -> showBase("HEAD", rel) to "uncommitted"   // uncommitted-only rows have no branch diff
             else -> showBase(baseRef() ?: "HEAD", rel) to "${base()} ↔ working"          // whole branch
         }
         val factory = DiffContentFactory.getInstance()
@@ -754,8 +995,17 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
                 }
             }
         }))
+        // Land on the first comment, not the first change — notes above it would be scrolled past.
+        firstCommentLine(rel)?.let {
+            req.putUserData(com.intellij.diff.util.DiffUserDataKeys.SCROLL_TO_LINE,
+                com.intellij.openapi.util.Pair.create(com.intellij.diff.util.Side.RIGHT, it))
+        }
         return req
     }
+
+    /** Earliest comment line on [rel] (yours + Claude's while shown), 0-based; null = none.
+     *  ponytail: stored lines, not re-anchored — close enough to put the note on screen. */
+    fun firstCommentLine(rel: String): Int? = (commentsFor(rel) + aiCommentsFor(rel)).minOfOrNull { it.line }
 
     /** Double-click: open the file's diff in a permanent (pinned) tab. The request build spawns git,
      *  so it runs off the EDT (the preview path already does, via the diff processor). */
@@ -797,8 +1047,8 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
                 if (line < d.lineCount) d.getText(com.intellij.openapi.util.TextRange(d.getLineStartOffset(line), d.getLineEndOffset(line))) else null
             }
         } ?: return 0 to 0
-        val m = TODO_RE.find(text) ?: return 0 to 0
-        return m.range.first to (text.length - m.range.first)
+        val col = VettyParse.todoCol(text)
+        return if (col < 0) 0 to 0 else col to (text.length - col)
     }
 
     // --- TODO scanner -----------------------------------------------------------------------

@@ -18,6 +18,7 @@
         <toolWindow id="Vetty" anchor="right" icon="AllIcons.Actions.Preview"
                     factoryClass="dev.vetty.VettyToolWindowFactory"/>
         <postStartupActivity implementation="dev.vetty.VettyStartup"/>
+        <notificationGroup id="Vetty" displayType="BALLOON"/>
     </extensions>
 
     <actions>
@@ -28,5 +29,8 @@
             <add-to-group group-id="Diff.ViewerPopupMenu" anchor="last"/>
             <keyboard-shortcut keymap="$default" first-keystroke="alt shift C"/>
         </action>
+        <action id="Vetty.ClearGuidedReview" class="dev.vetty.VettyClearGuidedReviewAction"
+                text="Vetty: Clear Guided Review"
+                description="Delete Claude's review order and all its notes for this worktree"/>
     </actions>
 </idea-plugin>

@@ -4,10 +4,10 @@ const vscode = require('vscode');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { lineRef } = require('../lib');
+const { lineRef, relocate, tablesToText } = require('../lib');
 const {
   app, refreshTree, getCwd, git, gh, ghAvailable, prEnabled, REVIEW_KEY, setBaseFor, updateViewedContext,
-  stateScope, getViewed, setViewed, isViewed, unstageOnUnview,
+  stateScope, getViewed, setViewed, isViewed, unstageOnUnview, claudeReview, claudeReviewPath, deleteClaudeComments, guidedReviewOn, guidedNotesExpanded,
 } = require('./core');
 
 // --- Local review comments: PR-style inline comment threads, persisted in workspaceState ---
@@ -24,6 +24,12 @@ const builtDocs = new Set(); // uri.toString() already hydrated this session
 let prCommentMap = new Map(); // rel → [{ id, line, body, author, resolved, diffHunk, outdated }]
 const prThreads = []; // live read-only PR threads (disposed when the review ends)
 const prShownKeys = new Set(); // comment ids already rendered — additive pulls skip these
+// PR comments deleted locally: GitHub keeps them, vetty just stops showing them (survives re-pulls
+// and restarts). Keyed by GraphQL node id, which is globally unique — no repo/branch scope needed.
+const PR_DISMISSED_KEY = 'vetty.prDismissed';
+function prDismissed() {
+  return new Set(app.context?.workspaceState.get(PR_DISMISSED_KEY) || []);
+}
 
 function getComments(context) {
   return context.workspaceState.get(commentsKey()) || {};
@@ -97,6 +103,7 @@ async function persistComments(context) {
   }
   await context.workspaceState.update(commentsKey(), map);
   app.commentsTree?.refresh();
+  refreshTree(); // 💬 badges on file rows track comment counts
 }
 
 /** Find which line `anchor` is on now — the stored line if unchanged, else the nearest line that matches. */
@@ -171,12 +178,14 @@ async function fetchPrComments(cwd, repo, number) {
  *  Built up front (not per-open) so they all show in the Comments panel immediately. */
 function buildPrThreads(cwd, states) {
   if (!commentController || !cwd) return;
+  const dismissed = prDismissed();
   for (const [rel, comments] of prCommentMap) {
     const uri = vscode.Uri.file(path.join(cwd, rel));
     for (const c of comments) {
       const state = c.resolved ? 'resolved' : 'open';
       if (!states.has(state)) continue;
       if (prShownKeys.has(c.id)) continue; // already shown — additive pulls don't duplicate
+      if (dismissed.has(c.id)) continue; // deleted locally
       prShownKeys.add(c.id);
       // For outdated comments the line moved, so show the original code context (the comment's diff hunk).
       let md = c.body;
@@ -191,7 +200,11 @@ function buildPrThreads(cwd, states) {
       const range = new vscode.Range(c.line - 1, 0, c.line - 1, 0);
       const comment = { body: new vscode.MarkdownString(md), mode: vscode.CommentMode.Preview, author: { name: c.author } };
       const thread = commentController.createCommentThread(uri, range, [comment]);
-      thread.isPr = true; // never persisted, no edit/delete
+      thread.isPr = true; // never persisted, no edit; delete = dismiss locally
+      thread.prId = c.id;
+      thread.prRel = rel;
+      thread.prBody = c.body;
+      thread.prAuthor = c.author;
       thread.canReply = false;
       thread.contextValue = 'prComment';
       thread.label = (c.resolved ? '✓ Resolved' : 'Open') + (c.outdated ? ' · outdated' : '') + ' · PR';
@@ -199,6 +212,122 @@ function buildPrThreads(cwd, states) {
       prThreads.push(thread);
     }
   }
+  app.commentsTree?.refresh();
+}
+
+/** Delete PR comments locally: hide the threads now and on every later pull. GitHub is untouched. */
+async function dismissPrThreads(context, threads) {
+  const ids = prDismissed();
+  for (const t of threads) {
+    ids.add(t.prId);
+    const i = prThreads.indexOf(t);
+    if (i >= 0) prThreads.splice(i, 1);
+    t.dispose();
+  }
+  await context.workspaceState.update(PR_DISMISSED_KEY, [...ids]);
+  app.commentsTree?.refresh();
+}
+
+// --- Claude notes: context comments from the review file (any Claude session writes it) ---
+// Read-only context, NOT change requests: they never block stage-on-view and aren't exported as
+// tasks. Delete removes the note from the file itself, so it goes for both editors.
+const aiThreads = [];
+let aiShown = null; // key of what the live threads were built from (review object + included notes)
+
+/** Rebuild Claude threads when the review file (or branch) changed. Cheap no-op otherwise. */
+function syncAiThreads() {
+  const cwd = getCwd();
+  const review = app.context && guidedReviewOn(app.context) ? claudeReview() : null; // Guided Review off → no notes
+  // Only notes on files in this review — a note on a file Vetty doesn't list has no row to belong to.
+  const inReview = new Set(app.diffTree?.files || []);
+  const notes = (review?.comments || []).filter((c) => inReview.has(c.file));
+  const key = review ? notes.map((c) => `${c.file}:${c.line}`).join('|') : null;
+  if (!commentController || !cwd || (review === aiShown?.review && key === aiShown?.key)) return;
+  aiShown = { review, key };
+  for (const t of aiThreads) t.dispose();
+  aiThreads.length = 0;
+  const linesOf = new Map(); // rel → current lines, to re-anchor notes the code has moved since
+  for (const c of notes) {
+    if (!linesOf.has(c.file)) {
+      let lines = [];
+      try {
+        lines = fs.readFileSync(path.join(cwd, c.file), 'utf8').split(/\r?\n/);
+      } catch {
+        // deleted file — keep stored lines
+      }
+      linesOf.set(c.file, lines);
+    }
+    const fileLines = linesOf.get(c.file);
+    // Clamp: a note whose line is gone (file shrank, anchor not found) still needs a real line to sit on.
+    const last = Math.max(0, fileLines.length - 1);
+    const line = Math.min(relocate(fileLines, c.line, c.anchor), last);
+    const range = new vscode.Range(line, 0, Math.min(line + (c.endLine - c.line), last), 0);
+    const comment = { body: new vscode.MarkdownString(tablesToText(c.body)), mode: vscode.CommentMode.Preview, author: { name: c.big ? 'Big picture' : 'Detail' } }; // the line above the body: what kind of note, not who
+    const thread = commentController.createCommentThread(vscode.Uri.file(path.join(cwd, c.file)), range, [comment]);
+    thread.isAi = true; // never persisted; delete = remove from the review file
+    thread.ai = c;
+    thread.canReply = false;
+    thread.contextValue = 'aiComment';
+    thread.label = 'Claude · guided review'; // source once, in the header
+    thread.collapsibleState = aiState(c); // big picture open; block/detail per the ⋯ toggle
+    aiThreads.push(thread);
+  }
+  app.commentsTree?.refresh();
+}
+
+/** Big-picture notes always open; the rest follow "Guided notes: expanded/collapsed" (⋯ menu). A
+ *  file dense with block notes reads better with them one click away. */
+function aiState(c) {
+  const open = c.big || (app.context && guidedNotesExpanded(app.context));
+  return open ? vscode.CommentThreadCollapsibleState.Expanded : vscode.CommentThreadCollapsibleState.Collapsed;
+}
+/** Re-apply the expanded/collapsed preference to the live threads (no rebuild). */
+function applyGuidedNotesState() {
+  for (const t of aiThreads) t.collapsibleState = aiState(t.ai);
+}
+
+/** Earliest line (0-based) holding a comment on `rel` — Claude notes (while shown), PR threads, or
+ *  your own — else null. Opening a file scrolls here so notes above the first change aren't missed. */
+function firstCommentLine(context, rel) {
+  const lines = aiThreads.filter((t) => t.ai.file === rel).map((t) => t.range.start.line);
+  for (const t of prThreads) if (t.prRel === rel) lines.push(t.range.start.line);
+  for (const n of getComments(context)[rel] || []) lines.push(n.range[0]);
+  return lines.length ? Math.min(...lines) : null;
+}
+
+/** Delete Claude notes from the shared review file, then rebuild. */
+function deleteAiNotes(notes) {
+  try {
+    deleteClaudeComments(notes);
+  } catch (e) {
+    vscode.window.showErrorMessage(`Could not update the Claude review file: ${e.message}`);
+  }
+  syncAiThreads();
+}
+
+/** Palette: delete the guided review (Claude's order + all its notes) for this worktree — both
+ *  editors, since they share the file. scope.json stays: Vetty rewrites it on every refresh anyway. */
+async function clearGuidedReview() {
+  const p = claudeReviewPath();
+  if (!p || !fs.existsSync(p)) {
+    vscode.window.showInformationMessage('No guided review to clear.');
+    return;
+  }
+  const ok = await vscode.window.showWarningMessage(
+    "Clear the guided review? This deletes Claude's review order and all its notes (in both editors).",
+    { modal: true },
+    'Clear'
+  );
+  if (ok !== 'Clear') return;
+  try {
+    fs.unlinkSync(p);
+  } catch (e) {
+    vscode.window.showErrorMessage(`Could not delete ${p}: ${e.message}`);
+    return;
+  }
+  syncAiThreads();
+  refreshTree();
+  vscode.window.setStatusBarMessage('Guided review cleared', 2500);
 }
 
 function clearPrThreads() {
@@ -206,6 +335,7 @@ function clearPrThreads() {
   prThreads.length = 0;
   prShownKeys.clear();
   prCommentMap = new Map();
+  app.commentsTree?.refresh();
 }
 
 async function createComment(context, reply) {
@@ -246,6 +376,8 @@ async function exportComments(context) {
 }
 
 async function deleteComment(context, thread) {
+  if (thread?.isPr) return dismissPrThreads(context, [thread]);
+  if (thread?.isAi) return deleteAiNotes([thread.ai]);
   const cwd = getCwd();
   const rel = thread.dbRel || (cwd && relOf(cwd, thread.uri));
   const i = commentThreads.indexOf(thread);
@@ -342,7 +474,7 @@ class CommentsTree {
     this._emitter.fire();
     if (app.commentsTreeView) {
       const map = getComments(this.context);
-      const n = Object.values(map).reduce((a, notes) => a + notes.length, 0);
+      const n = Object.values(map).reduce((a, notes) => a + notes.length, 0) + prThreads.length + aiThreads.length;
       app.commentsTreeView.description = n ? String(n) : '';
     }
   }
@@ -350,29 +482,70 @@ class CommentsTree {
     return el;
   }
   getChildren(el) {
-    if (el) return [];
+    if (el) return el.entries;
     const map = getComments(this.context);
-    const items = [];
+    const pairs = []; // yours + PR threads → "Comments"
+    const guided = []; // Claude's notes → "Guided review"
     for (const rel of Object.keys(map)) {
       (map[rel] || []).forEach((n, i) => {
         const text = n.comments.join(' / ').replace(/\s+/g, ' ').trim();
         const loc = lineRef(n.range[0], n.range[2], n.range[3]);
         const it = new vscode.TreeItem(text || '(empty)');
-        it.description = `${path.basename(rel)}:${loc}`;
+        it.description = `:${loc}`; // the file is the parent row
         it.tooltip = `${rel}:${loc}\n\n${n.comments.join('\n\n')}`;
         it.iconPath = new vscode.ThemeIcon('comment');
         it.note = { rel, i }; // index into the stored per-file array, for edit/delete
         it.contextValue = 'vettyComment';
         it.command = { command: 'vetty.commentGoTo', title: 'Go to', arguments: [rel, n.range[0], n.anchor] };
-        items.push(it);
+        pairs.push([rel, it]);
       });
     }
-    if (!items.length) {
+    // Pulled PR threads (read-only; Delete hides them locally).
+    for (const t of prThreads) {
+      const line = t.range.start.line;
+      const it = new vscode.TreeItem((t.prBody || '').replace(/\s+/g, ' ').trim() || '(empty)');
+      it.description = `:${line + 1}  ·  PR @${t.prAuthor}${t.label?.startsWith('✓') ? ' · resolved' : ''}`;
+      it.tooltip = `${t.prRel}:${line + 1} — ${t.label}\n\n@${t.prAuthor}: ${t.prBody}`;
+      it.iconPath = new vscode.ThemeIcon('comment-discussion');
+      it.pr = t;
+      it.contextValue = 'vettyPrComment';
+      it.command = { command: 'vetty.commentGoTo', title: 'Go to', arguments: [t.prRel, line] };
+      pairs.push([t.prRel, it]);
+    }
+    // Claude context notes. Label = first line (bullet marker stripped); full markdown on hover.
+    for (const t of aiThreads) {
+      const line = t.range.start.line;
+      const first = t.ai.body.split('\n').map((l) => l.replace(/^\s*([-*+]|\d+\.|\|)\s*/, '').trim()).find(Boolean);
+      const it = new vscode.TreeItem(first || '(empty)');
+      it.description = `:${line + 1}${t.ai.big ? '  ·  big picture' : ''}`; // the section already says Claude
+      it.tooltip = new vscode.MarkdownString(`${t.ai.big ? '**Big picture**\n\n' : ''}${tablesToText(t.ai.body)}`);
+      it.iconPath = new vscode.ThemeIcon(t.ai.big ? 'map' : 'sparkle');
+      it.ai = t.ai;
+      it.contextValue = 'vettyAiComment';
+      it.command = { command: 'vetty.commentGoTo', title: 'Go to', arguments: [t.ai.file, line] };
+      guided.push([t.ai.file, it]);
+    }
+    const { fileGroups } = require('./tree'); // lazy, like tree's own require of comments
+    if (!pairs.length && !guided.length) {
       const it = new vscode.TreeItem('No comments');
       it.iconPath = new vscode.ThemeIcon('check');
       return [it];
     }
-    return items;
+    if (!guided.length) return fileGroups(getCwd(), pairs, 'comment'); // no guided review → no extra level
+    // Two sections so Claude's notes can be collapsed away, leaving just your comments. Stable ids →
+    // VS Code remembers each section's collapsed state across refreshes and reloads.
+    const section = (id, label, icon, entries) => {
+      const it = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Expanded);
+      it.id = id;
+      it.iconPath = new vscode.ThemeIcon(icon);
+      it.contextValue = id;
+      it.entries = entries;
+      return it;
+    };
+    return [
+      section('commentSection', `Comments (${pairs.length})`, 'comment', fileGroups(getCwd(), pairs, 'comment')),
+      section('guidedSection', `Guided review (${guided.length})`, 'sparkle', fileGroups(getCwd(), guided, 'guided')),
+    ];
   }
 }
 
@@ -387,6 +560,8 @@ async function commentGoTo(rel, line, anchor) {
 
 /** Right-click "Go to" on a comment row (row click does the same; this covers the menu). */
 async function commentOpen(context, item) {
+  if (item?.pr) return commentGoTo(item.pr.prRel, item.pr.range.start.line);
+  if (item?.ai) return commentGoTo(item.ai.file, item.command.arguments[1]); // [1] = relocated line
   const note = item?.note;
   if (!note) return;
   const n = getComments(context)[note.rel]?.[note.i];
@@ -394,9 +569,17 @@ async function commentOpen(context, item) {
 }
 
 /** Notes ({rel, i}) from a comments-view action: multi-selection if present, else the clicked row. */
+function selectedItems(item, sel) {
+  const picked = Array.isArray(sel) && sel.length ? sel : item ? [item] : [];
+  // A file header (or a whole section) stands for everything under it.
+  const flat = (x) => (x?.entries ? x.entries.flatMap(flat) : [x]);
+  return picked.flatMap(flat);
+}
 function selectedNotes(item, sel) {
-  const items = Array.isArray(sel) && sel.length ? sel : item ? [item] : [];
-  return items.map((x) => x?.note).filter(Boolean);
+  return selectedItems(item, sel).map((x) => x?.note).filter(Boolean);
+}
+function selectedPr(item, sel) {
+  return selectedItems(item, sel).map((x) => x?.pr).filter(Boolean);
 }
 
 /** Rewrite storage after a tree-side mutation, then rebuild live threads to match. */
@@ -411,6 +594,10 @@ async function saveAndRebuild(context, map) {
 }
 
 async function commentDelete(context, item, sel) {
+  const pr = selectedPr(item, sel);
+  if (pr.length) await dismissPrThreads(context, pr);
+  const ai = selectedItems(item, sel).map((x) => x?.ai).filter(Boolean);
+  if (ai.length) deleteAiNotes(ai);
   const notes = selectedNotes(item, sel);
   if (!notes.length) return;
   const map = getComments(context);
@@ -438,7 +625,9 @@ async function commentEdit(context, item) {
 
 async function commentCopy(context, item, sel) {
   const notes = selectedNotes(item, sel);
-  if (!notes.length) return;
+  const pr = selectedPr(item, sel);
+  const ai = selectedItems(item, sel).map((x) => x?.ai).filter(Boolean);
+  if (!notes.length && !pr.length && !ai.length) return;
   const map = getComments(context);
   const lines = notes
     .map((note) => {
@@ -447,9 +636,18 @@ async function commentCopy(context, item, sel) {
       const text = n.comments.join(' / ').replace(/\s+/g, ' ').trim();
       return `- ${note.rel}:${lineRef(n.range[0], n.range[2], n.range[3])} — ${text}`; // same format as Export
     })
-    .filter(Boolean);
-  await vscode.env.clipboard.writeText(lines.join('\n'));
-  vscode.window.setStatusBarMessage(`Copied ${lines.length} comment(s)`, 2000);
+    .filter(Boolean)
+    .concat(pr.map((t) => `- ${t.prRel}:${t.range.start.line + 1} — ${(t.prBody || '').replace(/\s+/g, ' ').trim()}`));
+  // Claude notes are multi-line markdown (bullets, tables) — keep their shape under a file:line heading.
+  const aiBlocks = ai.map((c) => `### ${c.file}:${c.line + 1}${c.big ? ' (big picture)' : ''}\n\n${c.body}`);
+  await vscode.env.clipboard.writeText([lines.join('\n'), aiBlocks.join('\n\n')].filter(Boolean).join('\n\n') + '\n');
+  vscode.window.setStatusBarMessage(`Copied ${lines.length + aiBlocks.length} comment(s)`, 2000);
+}
+
+/** Section header Copy: everything under "Comments" or "Guided review" (section → file groups → rows). */
+async function copySection(context, section) {
+  const rows = (section?.entries || []).flatMap((g) => g.entries || []);
+  if (rows.length) await commentCopy(context, null, rows);
 }
 
 /** Register the comment controller + comment commands, and hydrate stored comments as editors open. */
@@ -466,6 +664,7 @@ function initComments(context) {
     vscode.commands.registerCommand('vetty.deleteComment', (thread) => deleteComment(context, thread)),
     vscode.commands.registerCommand('vetty.exportComments', () => exportComments(context)),
     vscode.commands.registerCommand('vetty.clearComments', () => clearAllComments(context)),
+    vscode.commands.registerCommand('vetty.clearGuidedReview', () => clearGuidedReview()),
     vscode.commands.registerCommand('vetty.copyComment', (comment) => copyComment(comment)),
     vscode.commands.registerCommand('vetty.editComment', (comment) => editComment(comment)),
     vscode.commands.registerCommand('vetty.saveComment', (comment) => saveComment(context, comment)),
@@ -474,6 +673,7 @@ function initComments(context) {
     vscode.window.onDidChangeActiveTextEditor((ed) => ed && hydrateComments(context, ed.document))
   );
   for (const ed of vscode.window.visibleTextEditors) hydrateComments(context, ed.document);
+  syncAiThreads();
 }
 
 // --- PR review flow (experimental, gated on the pullRequests.enabled setting + gh) ---
@@ -672,7 +872,7 @@ async function submitReview(context) {
 }
 
 module.exports = {
-  initComments, onBranchChanged, updatePrTitle, togglePrMode, getComments,
+  initComments, onBranchChanged, syncAiThreads, applyGuidedNotesState, firstCommentLine, updatePrTitle, togglePrMode, getComments,
   reviewPr, finishReview, pullPrComments, submitReview,
-  CommentsTree, commentGoTo, commentOpen, commentDelete, commentEdit, commentCopy,
+  CommentsTree, commentGoTo, commentOpen, commentDelete, commentEdit, commentCopy, copySection,
 };

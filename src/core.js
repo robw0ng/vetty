@@ -7,7 +7,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { promisify } = require('util');
-const { parseAheadBehind, parseTodoHunks, eolNormalize } = require('../lib');
+const { parseAheadBehind, parseTodoHunks, eolNormalize, parseClaudeReview, removeClaudeComments } = require('../lib');
 
 const execFileAsync = promisify(cp.execFile);
 
@@ -47,14 +47,52 @@ function workspaceFolderPath() {
 function getCwd() {
   return repoRoot ?? workspaceFolderPath();
 }
+let gitDir = null; // absolute .git dir — a FILE-based .git (worktrees, submodules) points elsewhere
 async function resolveRepoRoot() {
   repoRoot = null;
+  gitDir = null;
   const ws = workspaceFolderPath();
   if (!ws) return;
   try {
     repoRoot = path.normalize((await git(ws, ['rev-parse', '--show-toplevel'])).trim()) || null;
+    gitDir = path.normalize((await git(ws, ['rev-parse', '--absolute-git-dir'])).trim()) || null;
   } catch {
     // not a git repo — getCwd() falls back to the folder itself
+  }
+}
+
+// `git diff` refreshes the index's stat cache and WRITES .git/index — including the six reads
+// load() runs. (--no-optional-locks suppresses that for `status`, but NOT for `diff`; verified.)
+// The watcher below would fire on vetty's own reads and schedule a reload, which runs the reads
+// again: a permanent ~400ms refresh loop. So stamp the index's mtime after every git call and
+// ignore a watcher event that still matches it — that write was ours. If an external write races
+// in, the stamp won't match and the reload happens as normal; the cost of losing is one extra
+// reload, never a missed change.
+let selfIndexMtime = 0;
+function indexPath() {
+  return gitDir ? path.join(gitDir, 'index') : null;
+}
+function stampIndexMtime() {
+  try {
+    const p = indexPath();
+    selfIndexMtime = p ? fs.statSync(p).mtimeMs : 0;
+  } catch {
+    selfIndexMtime = 0; // no index yet (fresh repo) — nothing to suppress
+  }
+}
+function isSelfIndexWrite(uri) {
+  const p = indexPath();
+  if (!p || !selfIndexMtime) return false;
+  // Matched by name, NOT by comparing the two absolute paths: the watcher's path form need not
+  // equal what `git rev-parse` returned (8.3 short names like ROBERT~1, drive-letter casing, UNC),
+  // and a mismatch would silently disable the suppression — the loop back, with no symptom to
+  // point at it. The watcher glob already scopes events to this repo's .git.
+  const changed = (uri?.fsPath ?? String(uri ?? '')).replace(/\\/g, '/').toLowerCase();
+  if (!changed.endsWith('/.git/index')) return false; // HEAD/ORIG_HEAD are never ours to suppress
+  try {
+    return fs.statSync(p).mtimeMs === selfIndexMtime;
+  } catch {
+    return false;
   }
 }
 
@@ -66,10 +104,101 @@ function watchGitDir(context, bump) {
   const cwd = getCwd();
   if (!cwd) return;
   gitWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(cwd, '.git/{HEAD,ORIG_HEAD,index}'));
-  gitWatcher.onDidChange(bump);
-  gitWatcher.onDidCreate(bump);
-  gitWatcher.onDidDelete(bump);
+  const onGitFile = (uri) => {
+    if (isSelfIndexWrite(uri)) return dbg(`skip self index write: ${uri?.fsPath ?? uri}`);
+    bump(uri);
+  };
+  gitWatcher.onDidChange(onGitFile);
+  gitWatcher.onDidCreate(onGitFile);
+  gitWatcher.onDidDelete(onGitFile);
   context.subscriptions.push(gitWatcher);
+  // Claude's review file lives in the git dir (worktree-aware), outside the working-tree watcher.
+  claudeWatcher?.dispose();
+  claudeWatcher = null;
+  if (!gitDir) return;
+  claudeWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(gitDir, 'vetty/claude-review.json'));
+  claudeWatcher.onDidChange(bump);
+  claudeWatcher.onDidCreate(bump);
+  claudeWatcher.onDidDelete(bump);
+  context.subscriptions.push(claudeWatcher);
+}
+let claudeWatcher = null;
+
+// Claude review file: any Claude session (vetty-review skill) writes an intuitive review order and
+// short context notes here; both editors read it. One file per worktree, scoped to one branch.
+function claudeReviewPath() {
+  return gitDir ? path.join(gitDir, 'vetty', 'claude-review.json') : null;
+}
+let claudeCache = { key: null, value: null };
+/** Parsed review for the current branch, or null. Same object until the file or branch changes, so
+ *  callers can compare by identity to skip rebuilds. */
+function claudeReview() {
+  const p = claudeReviewPath();
+  let key = null;
+  try {
+    const st = p && fs.statSync(p);
+    if (st) key = `${st.mtimeMs}:${st.size}:${activeBranch}`;
+  } catch {
+    // no file yet
+  }
+  if (key !== claudeCache.key) {
+    let value = null;
+    try {
+      value = key ? parseClaudeReview(fs.readFileSync(p, 'utf8'), activeBranch) : null;
+    } catch {
+      // unreadable mid-write — the watcher fires again when the write completes
+    }
+    claudeCache = { key, value };
+  }
+  return claudeCache.value;
+}
+/** Stamp of the review file on disk (mtime:size), branch-independent — '' when absent. Lets the tree
+ *  notice a (re)annotation even when it's for another branch. */
+function claudeReviewStamp() {
+  try {
+    const st = fs.statSync(claudeReviewPath());
+    return `${st.mtimeMs}:${st.size}`;
+  } catch {
+    return '';
+  }
+}
+/** Branch named inside the review file, whatever branch we're on (for the "annotated for X" message). */
+function claudeReviewFileBranch() {
+  try {
+    return String(JSON.parse(fs.readFileSync(claudeReviewPath(), 'utf8')).branch || '');
+  } catch {
+    return '';
+  }
+}
+/** Delete Claude notes (parsed entries) from the file — shared, so they go for both editors. */
+function deleteClaudeComments(list) {
+  const p = claudeReviewPath();
+  if (!p || !list.length) return;
+  fs.writeFileSync(p, removeClaudeComments(fs.readFileSync(p, 'utf8'), list));
+}
+/** Vetty's exact review set, for Claude sessions (vetty-review skill). Written only when it changes. */
+let lastScope = null;
+function writeScope(scope) {
+  if (!gitDir) return;
+  const text = JSON.stringify({ note: 'Written by Vetty: the files it lists for review. Annotate only these.', ...scope }, null, 2) + '\n';
+  if (text === lastScope) return;
+  try {
+    fs.mkdirSync(path.join(gitDir, 'vetty'), { recursive: true });
+    fs.writeFileSync(path.join(gitDir, 'vetty', 'scope.json'), text);
+    lastScope = text;
+  } catch (e) {
+    dbg(`scope write failed: ${e.message}`);
+  }
+}
+function activeBranchName() {
+  return activeBranch;
+}
+/** Editor threads for Claude's block/detail notes start expanded (true) or collapsed (default). */
+function guidedNotesExpanded(context) {
+  return context.workspaceState.get('vetty.guidedNotesExpanded') === true;
+}
+function guidedReviewOn(context) {
+  return context.workspaceState.get('vetty.guidedReview') === true;
 }
 
 // Debug log (churn hunting): opt-in via the vetty.debug setting → "Vetty Debug" output channel.
@@ -93,8 +222,11 @@ function showDebugLog() {
 /** Async git — non-blocking, so the extension host stays responsive. */
 async function git(cwd, args) {
   const t0 = debugOn ? Date.now() : 0;
+  // --no-optional-locks → skip the stat-cache refresh write for the commands that honour it
+  // (`status` does; `diff` does NOT — stampIndexMtime below is what covers the rest).
   // core.quotePath=false → non-ASCII paths come out raw (not octal-escaped), so path joins resolve.
-  const { stdout } = await execFileAsync('git', ['-c', 'core.quotePath=false', ...args], { cwd, maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await execFileAsync('git', ['--no-optional-locks', '-c', 'core.quotePath=false', ...args], { cwd, maxBuffer: 16 * 1024 * 1024 });
+  stampIndexMtime(); // this call may have rewritten .git/index; don't let the watcher call it news
   if (debugOn) dbg(`git ${args.slice(0, 4).join(' ')}${args.length > 4 ? ' …' : ''} — ${Date.now() - t0}ms`);
   return stdout;
 }
@@ -104,9 +236,12 @@ function gitStdin(cwd, args, input) {
   return new Promise((resolve, reject) => {
     const p = cp.execFile(
       'git',
-      ['-c', 'core.quotePath=false', ...args],
+      ['--no-optional-locks', '-c', 'core.quotePath=false', ...args],
       { cwd, maxBuffer: 16 * 1024 * 1024 },
-      (err, stdout) => (err ? reject(err) : resolve(stdout))
+      (err, stdout) => {
+        stampIndexMtime();
+        return err ? reject(err) : resolve(stdout);
+      }
     );
     p.stdin.end(input);
   });
@@ -137,6 +272,12 @@ async function stageOnView(context, cwd, rels) {
   if (!vscode.workspace.getConfiguration('vetty').get('stageOnView', false)) return;
   const comments = require('./comments').getComments(context); // lazy — comments requires core at top level
   const approved = rels.filter((r) => !(comments[r] || []).length);
+  const skipped = rels.length - approved.length;
+  if (skipped)
+    vscode.window.setStatusBarMessage(
+      `Vetty: ${skipped === 1 ? '1 file' : `${skipped} files`} viewed but NOT staged — open comments (💬)`,
+      6000
+    );
   if (!approved.length) return;
   try {
     await gitAddChunked(cwd, approved); // also stages deletions for tombstoned files
@@ -228,8 +369,7 @@ const blobContentProvider = {
   },
 };
 
-// Case-sensitive (uppercase) so prose words like "note"/"bug" don't false-positive.
-const TODO_RE = /\b(TODO|FIXME|HACK|XXX|BUG|NOTE|OPTIMIZE|REVIEW|WIP|TEMP|REFACTOR|DEPRECATED)\b/;
+const { TODO_RE } = require('../lib'); // comment-leader / `LABEL:` only — see lib.js
 
 /** TODO/FIXME markers on added diff lines vs `ref` + every line of untracked files. */
 async function findTodos(cwd, ref) {
@@ -593,6 +733,44 @@ function setBaseFor(context, branch, base) {
   return context.workspaceState.update(LAST_BRANCH_KEY, base);
 }
 
+/** checkout -b continuation: marks are branch-keyed, so a new child branch starts empty even though
+ *  its content is identical to what was just reviewed. On switching to `cur`: find the branch we
+ *  came from in the HEAD reflog (restart-safe, unlike in-memory state), and if `cur` descends from
+ *  its tip (merge-base == tip — exactly what checkout -b produces) and has no marks of its own yet,
+ *  copy the parent's review state over. Hash-gating keeps it honest: only files whose content still
+ *  matches show viewed. Never fires INTO a trunk (feature→master after a merge would pollute it),
+ *  and never overwrites existing marks. */
+async function inheritBranchState(context, cwd, cur) {
+  try {
+    if (TRUNK_NAMES.includes(cur)) return;
+    const scope = (b) => `${getCwd() ?? ''}\n${b}`;
+    const KEYS = ['viewed', 'ignored', 'groups', 'comments'];
+    for (const k of KEYS) {
+      const v = context.workspaceState.get(`vetty.${k}.${scope(cur)}`);
+      if (v && Object.keys(v).length) return; // cur already has state — never overwrite
+    }
+    // Newest "checkout: moving from A to B" in the reflog tells us the parent candidate.
+    const reflog = await git(cwd, ['reflog', 'HEAD', '-n', '30', '--format=%gs']);
+    const m = reflog.split('\n').map((l) => /^checkout: moving from (\S+) to (\S+)/.exec(l)).find(Boolean);
+    if (!m || m[2] !== cur || m[1] === cur) return;
+    const prev = m[1];
+    const prevViewed = context.workspaceState.get(`vetty.viewed.${scope(prev)}`);
+    if (!prevViewed || !Object.keys(prevViewed).length) return;
+    const prevTip = (await git(cwd, ['rev-parse', '--verify', prev])).trim();
+    const mb = (await git(cwd, ['merge-base', prev, cur])).trim();
+    if (!prevTip || prevTip !== mb) return; // cur is not a child of prev's current tip
+    for (const k of KEYS) {
+      const v = context.workspaceState.get(`vetty.${k}.${scope(prev)}`);
+      // Deep-copy: storing the same object under both keys would alias A's and B's marks.
+      if (v) await context.workspaceState.update(`vetty.${k}.${scope(cur)}`, JSON.parse(JSON.stringify(v)));
+    }
+    stateCache.clear(); // memoized state for the new scope must re-read
+    dbg(`inherited review state ${prev} → ${cur}`);
+  } catch (e) {
+    dbg(`inherit skipped: ${e.message}`);
+  }
+}
+
 const validatedBase = new Set(); // `${branch}\0${base}` already vetted this session (skip git re-checks)
 
 /** Resolve the base for the current branch: remembered → else closest ancestor. Mirrors to LAST_BRANCH_KEY. */
@@ -600,6 +778,7 @@ async function resolveBase(context, cwd) {
   const cur = await currentBranch(cwd);
   if (cur && cur !== activeBranch) {
     activeBranch = cur; // viewed/ignored/groups/comments are keyed by this
+    await inheritBranchState(context, cwd, cur); // checkout -b continuation: child inherits marks
     // Comments are branch-scoped: drop the old branch's live threads and hydrate this branch's,
     // so a persist after the switch can't write branch-A threads under branch-B's key.
     require('./comments').onBranchChanged(context); // lazy — comments requires core at top level
@@ -728,7 +907,7 @@ module.exports = {
   app, refreshTree, dbg, updateDebugFlag, showDebugLog,
   LAST_BRANCH_KEY, MAX_OPEN_WITHOUT_CONFIRM, REVIEW_KEY, FOLDER_KEY,
   BASE_SCHEME, BLOB_SCHEME, baseUriFor, blobUriFor, baseContentProvider, blobContentProvider,
-  workspaceFolderPath, getCwd, resolveRepoRoot, watchGitDir,
+  workspaceFolderPath, getCwd, resolveRepoRoot, watchGitDir, isSelfIndexWrite,
   git, gitStdin, gitAddChunked, gitBlobBytes, stageOnView, unstageOnUnview, mergeBaseRef,
   gh, ghAvailable, prEnabled, updatePrMode, detectGh,
   TODO_RE, findTodos, untrackedFiles,
@@ -741,4 +920,5 @@ module.exports = {
   purgeOnMergeBaseChange,
   updateViewedContext, shortRef,
   DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff,
+  claudeReview, claudeReviewPath, claudeReviewStamp, claudeReviewFileBranch, deleteClaudeComments, guidedReviewOn, guidedNotesExpanded, writeScope, activeBranchName,
 };

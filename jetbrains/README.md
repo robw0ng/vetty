@@ -16,7 +16,8 @@ Works in Rider and every other JetBrains IDE (depends only on the platform, not 
 - **Hide whitespace-only changes** — toolbar toggle drops files whose only change is formatting.
 - **Two diff toggles**: **Range** — whole branch (merge-base) ⇄ uncommitted (vs HEAD); **Compare** (last viewed / base) — unviewed files diff against their last-viewed snapshot instead of the range base.
 - **Inline comments** — `Alt+Shift+C` (or right-click → Vetty: Add Comment) adds a gutter comment on the line/selection; click the gutter icon to edit/delete. Comments re-anchor by content when a file is rewritten. **Export Comments** copies all as `file:line — note`.
-- **TODO scanner** — new TODO/FIXME/etc. introduced vs the base, in their own pane.
+- **Claude review order + notes** — a Claude session (the `vetty-review` skill) writes `<git-dir>/vetty/claude-review.json`; notes show as read-only gutter comments (bulb icon) and in the Comments pane, all shown only while the **Guided Review** toolbar toggle is on, which also orders the Review list with `#n` (one-line why in the tooltip). See the main README.
+- **TODO scanner** — new TODO/FIXME/etc. introduced vs the base, in their own pane, grouped by file. Only real markers count (after a comment leader, or as `TODO:`), not identifiers like `%TEMP%`.
 - **Track / Untrack** — push noise files (lockfiles, generated) into the Untracked section.
 - **Auto-refresh** — the tree reloads on any file change, including out-of-editor agent edits; typing re-flags a viewed file unviewed instantly.
 

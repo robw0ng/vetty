@@ -3,7 +3,7 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
-const { parseNumstat } = require('../lib');
+const { parseNumstat, todoCol, ago } = require('../lib');
 const core = require('./core');
 const {
   app, getCwd, git, untrackedFiles, getViewed, setViewed, viewedEntries, getIgnored, getGroups, setGroups, isViewed,
@@ -64,11 +64,9 @@ const fileDecorations = {
     const letter = app.diffTree.status.get(rel);
     if (!letter) return;
     const color = STATUS_COLOR[letter];
-    return {
-      badge: letter,
-      tooltip: `Changed vs ${app.diffTree.base} (${letter})`,
-      color: color ? new vscode.ThemeColor(color) : undefined,
-    };
+    // No decoration tooltip: VS Code appends it to every row's hover card ("• Changed vs …"), and
+    // the Review row's own card already says the change kind + base.
+    return { badge: letter, color: color ? new vscode.ThemeColor(color) : undefined };
   },
 };
 
@@ -119,7 +117,30 @@ class DiffTree {
   visibleFiles(cwd) {
     const viewed = getViewed(this.context, this.base);
     const ignored = getIgnored(this.context, this.base);
-    return this.files.filter((f) => !ignored.has(f) && this._matches(cwd, viewed, f));
+    return this._ordered(this.files.filter((f) => !ignored.has(f) && this._matches(cwd, viewed, f)));
+  }
+
+  /** Guided Review steps: Claude's order restricted to files actually in this review (out-of-diff
+   *  and untracked-group entries dropped), renumbered 1..n so the #s have no gaps. Map rel → { n, note };
+   *  empty while Guided Review is off. ponytail: recomputed per call — the order list is short. */
+  steps() {
+    const review = core.guidedReviewOn(this.context) ? core.claudeReview() : null;
+    const map = new Map();
+    if (!review?.order.size) return map;
+    const present = new Set(this.files);
+    const ignored = getIgnored(this.context, this.base);
+    for (const [rel, e] of review.order)
+      if (present.has(rel) && !ignored.has(rel)) map.set(rel, { n: map.size + 1, note: e.note });
+    return map;
+  }
+
+  /** Guided Review: listed files first, in step order; the rest keep git's order after them.
+   *  Everything that walks the list (groups, j/k) follows. */
+  _ordered(list) {
+    const steps = this.steps();
+    if (!steps.size) return list;
+    const at = (r) => steps.get(r)?.n ?? Infinity;
+    return [...list].sort((a, b) => at(a) - at(b)); // stable
   }
 
   refresh() {
@@ -144,6 +165,8 @@ class DiffTree {
     const realChanged = new Set();
     const staged = new Set(); // in the index (git diff --cached)
     const staleStaged = new Set(); // staged AND edited since (working ≠ index) — restage before commit
+    const dirty = new Set(); // working ≠ index (any file)
+    const wtOnly = new Set(); // branch range: changed vs HEAD but NOT vs the merge-base (committed, then undone)
     if (cwd && this.base) {
       try {
         // All six git reads are independent — run them concurrently (sequential spawns made every
@@ -161,17 +184,20 @@ class DiffTree {
           git(cwd, ['diff', '--cached', '--name-only']),
           git(cwd, ['diff', '--name-only']),
         ]);
-        for (const line of out.split('\n')) {
-          const parts = line.split('\t');
-          if (parts.length < 2) continue;
-          const rel = parts[parts.length - 1].trim(); // rename → new path
-          if (!rel) continue;
-          const letter = parts[0].trim()[0];
-          files.push(rel);
-          status.set(rel, letter);
-          if (letter === 'A') added.add(rel);
-          if (letter === 'D') deleted.add(rel);
-        }
+        const addNameStatus = (text, keep) => {
+          for (const line of text.split('\n')) {
+            const parts = line.split('\t');
+            if (parts.length < 2) continue;
+            const rel = parts[parts.length - 1].trim(); // rename → new path
+            if (!rel || !keep(rel)) continue;
+            const letter = parts[0].trim()[0];
+            files.push(rel);
+            status.set(rel, letter);
+            if (letter === 'A') added.add(rel);
+            if (letter === 'D') deleted.add(rel);
+          }
+        };
+        addNameStatus(out, () => true);
         // +/- line counts (binary files report "-\t-"); skipped silently.
         parseNumstat(ns).forEach((v, k) => stat.set(k, v));
         for (const line of wOut.split('\n')) {
@@ -192,12 +218,28 @@ class DiffTree {
           const rel = r.trim();
           if (rel) staged.add(rel);
         }
-        const dirty = new Set(); // working ≠ index (any file)
         for (const r of dirtyOut.split('\n')) {
           const rel = r.trim();
           if (!rel) continue;
           dirty.add(rel);
           if (staged.has(rel)) staleStaged.add(rel); // working ≠ index on a staged file
+        }
+        // Branch range: a change that was committed and then undone in the working tree nets to zero
+        // vs the merge-base, so the branch diff drops the file — while Source Control still lists it
+        // (it differs from HEAD). List those too, flagged uncommitted-only, and diff them vs HEAD.
+        const uncommittedOnly = [...staged, ...dirty].filter((r) => !status.has(r));
+        if (this.listRef !== 'HEAD' && uncommittedOnly.length) {
+          const keep = new Set(uncommittedOnly);
+          const [hns, hnum] = await Promise.all([
+            git(cwd, ['diff', '--name-status', 'HEAD']),
+            git(cwd, ['diff', '--numstat', 'HEAD']),
+          ]);
+          addNameStatus(hns, (r) => {
+            if (!keep.has(r) || status.has(r)) return false;
+            wtOnly.add(r);
+            return true;
+          });
+          parseNumstat(hnum).forEach((v, k) => wtOnly.has(k) && stat.set(k, v));
         }
         // Stage-on-view sync: staging outside vetty (Source Control panel) counts as a review too.
         // Only clean staged files (index == working tree) qualify — a stale-staged file's working
@@ -229,6 +271,8 @@ class DiffTree {
     this.files = files;
     this.added = added;
     this.deleted = deleted;
+    this.dirty = dirty; // working ≠ index — with `staged`, distinguishes committed (clean) rows
+    this.wtOnly = wtOnly;
     this.status = status;
     this.stat = stat;
     this.realChanged = realChanged;
@@ -248,7 +292,51 @@ class DiffTree {
     require('./search').postSearchCounts(); // lazy: search requires this module's app refs via core
     fileDecorations.refresh();
     app.todoTree?.load();
+    require('./comments').syncAiThreads(); // Claude notes: rebuilt only when the review file/branch changed
+    await this._guidedStatus(cwd);
+    // Publish the exact review set so a Claude session annotates what Vetty lists — not its own guess
+    // at the diff (Vetty's base is often a parent branch, and it counts uncommitted + untracked files).
+    if (cwd && this.base) {
+      const ignored = getIgnored(this.context, this.base);
+      core.writeScope({
+        branch: core.activeBranchName(),
+        base: this.base,
+        mergeBase: this.baseRef,
+        range: diffRange(this.context),
+        files: files.filter((f) => !ignored.has(f)).map((f) => ({ file: f, status: status.get(f) })),
+      });
+    }
     core.dbg(`load done — ${Date.now() - t0}ms, ${files.length} files (base ${this.base})`);
+  }
+
+  /** Staleness of the guided review (commits since it was written) + announce (re)annotations.
+   *  `behind` is one `git rev-list --count` per load, only while Guided Review is on with a review. */
+  async _guidedStatus(cwd) {
+    const stamp = core.claudeReviewStamp();
+    const review = core.guidedReviewOn(this.context) ? core.claudeReview() : null;
+    this.guidedBehind = null;
+    if (review?.head && cwd) {
+      try {
+        this.guidedBehind = parseInt(await git(cwd, ['rev-list', '--count', `${review.head}..HEAD`]), 10) || 0;
+      } catch {
+        this.guidedBehind = null; // head unknown (rewritten history) — no number to show
+      }
+    }
+    // Announce once per file version: a new/updated review is easy to miss with the toggle off.
+    if (stamp === this.guidedStamp) return;
+    const first = this.guidedStamp === undefined;
+    this.guidedStamp = stamp;
+    if (first || !stamp) return; // startup / deletion — nothing to announce
+    const forBranch = core.claudeReviewFileBranch();
+    if (!core.guidedReviewOn(this.context)) {
+      if (forBranch && forBranch !== core.activeBranchName()) return; // another branch's — silent
+      vscode.window
+        .showInformationMessage(`Guided review ready for ${forBranch || 'this branch'}.`, 'Turn on')
+        .then((pick) => pick === 'Turn on' && toggleGuidedReview(this.context));
+    } else if (review) {
+      const n = this.steps().size;
+      vscode.window.setStatusBarMessage(`Guided review updated: ${n} file${n === 1 ? '' : 's'}, ${review.comments.length} notes`, 4000);
+    }
   }
 
   /** Show "N/total viewed · <mode>" by the title + a comment-count badge on the view. */
@@ -256,7 +344,8 @@ class DiffTree {
     if (!app.diffTreeView) return;
     vscode.commands.executeCommand('setContext', 'vetty.hasBase', !!this.base); // drives viewsWelcome
     const cwd = getCwd();
-    const mode = `range: ${DIFF_RANGE_SHORT[diffRange(this.context)]} · compare: ${sinceReviewOn(this.context) ? 'last viewed' : 'base'}`;
+    const order = this.guidedSummary();
+    const mode = `range: ${DIFF_RANGE_SHORT[diffRange(this.context)]} · compare: ${sinceReviewOn(this.context) ? 'last viewed' : 'base'}${order}`;
     if (!cwd || !this.base) {
       app.diffTreeView.description = mode;
       app.diffTreeView.badge = undefined;
@@ -274,6 +363,21 @@ class DiffTree {
     // Activity-bar badge = unviewed file count (like Source Control's change count).
     const unviewed = active.length - vw;
     app.diffTreeView.badge = unviewed ? { value: unviewed, tooltip: `${unviewed} unviewed file(s)` } : undefined;
+  }
+
+  /** " · guided · 2h ago · 3 commits behind · 2 unannotated" for the view description ('' when off/none). */
+  guidedSummary() {
+    const review = core.guidedReviewOn(this.context) ? core.claudeReview() : null;
+    const steps = this.steps();
+    if (!review || !steps.size) return '';
+    const ignored = getIgnored(this.context, this.base);
+    const missing = this.files.filter((f) => !ignored.has(f) && !steps.has(f)).length;
+    return [
+      ' · guided',
+      ago(review.writtenAt),
+      this.guidedBehind ? `${this.guidedBehind} commit${this.guidedBehind === 1 ? '' : 's'} behind` : '',
+      missing ? `${missing} unannotated` : '',
+    ].filter(Boolean).join(' · ');
   }
 
   getTreeItem(el) {
@@ -323,7 +427,7 @@ class DiffTree {
       if (!this.files.length) return []; // viewsWelcome shows the "no changes" message
       const viewed = getViewed(this.context, this.base);
       const ignored = getIgnored(this.context, this.base);
-      const shown = this.files.filter((f) => this._matches(cwd, viewed, f));
+      const shown = this._ordered(this.files.filter((f) => this._matches(cwd, viewed, f)));
       const active = shown.filter((f) => !ignored.has(f));
       const unv = active.filter((f) => !isViewed(cwd, viewed, f));
       const vw = active.filter((f) => isViewed(cwd, viewed, f));
@@ -394,6 +498,34 @@ class DiffTree {
     return it;
   }
 
+  /** Row hover card: name + change kind, folder, one line per state, then Claude's why (Guided Review). */
+  _tooltip(rel, { isIgnored, viewed, snap, isClean, nComments, step }) {
+    const KIND = { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', C: 'Copied', T: 'Type changed', U: 'New file' };
+    const facts = [
+      isIgnored ? 'Untracked (review noise)' : viewed ? 'Viewed' : snap ? 'Unviewed — edited since you viewed it' : 'Unviewed',
+      this.wtOnly?.has(rel) ? 'Uncommitted only — the working tree undoes a committed change (diff vs HEAD)' : '',
+      this.staleStaged?.has(rel) ? 'Staged, but edited since — restage before commit'
+        : this.staged?.has(rel) ? 'Staged'
+        : isClean && !isIgnored ? 'Committed — no uncommitted changes' : '',
+      nComments ? `${nComments} open comment${nComments === 1 ? '' : 's'} — blocks auto-stage` : '',
+    ].filter(Boolean);
+    const dir = path.dirname(rel);
+    const md = new vscode.MarkdownString();
+    md.appendMarkdown('**').appendText(path.basename(rel)).appendMarkdown('**');
+    const kind = KIND[this.status.get(rel)];
+    if (kind) md.appendText(`  ·  ${kind}${this.wtOnly?.has(rel) ? ' vs HEAD' : ` vs ${this.base}`}`);
+    if (dir !== '.') md.appendMarkdown('\n\n').appendText(dir);
+    md.appendMarkdown('\n\n---\n\n');
+    for (const f of facts) md.appendMarkdown('- ').appendText(f).appendMarkdown('\n');
+    if (step) {
+      md.appendMarkdown(`\n---\n\n**Guided #${step.n}**`);
+      if (step.note) md.appendText(`  ·  ${step.note}`);
+    } else if (!isIgnored && this.steps().size) {
+      md.appendMarkdown('\n---\n\n_Not in guided review_ — re-run the annotation to cover this file.');
+    }
+    return md;
+  }
+
   _file(cwd, rel, isIgnored) {
     const dir = path.dirname(rel);
     const hits = this.searchMatches && this.searchMatches.get(rel);
@@ -409,21 +541,37 @@ class DiffTree {
     const matchPart = hits ? `${hits.length} match${hits.length === 1 ? '' : 'es'}` : '';
     const group = getGroups(this.context, this.base)[rel];
     const groupPart = group ? `[${group}]` : '';
-    it.description = [groupPart, matchPart, counts, dirPart].filter(Boolean).join('  ·  ');
+    // 💬N = open comments (changes requested) — also why stage-on-view skips this file.
+    const nComments = (require('./comments').getComments(this.context)[rel] || []).length;
+    const commentPart = nComments ? `💬${nComments}` : '';
+    // ↻ = viewed before, edited since — a re-review, not a first look (snapshot restorable).
+    const viewedNow = isViewed(cwd, getViewed(this.context, this.base), rel);
+    const rePart =
+      !viewedNow && !isIgnored && reviewedBlob(getViewed(this.context, this.base), rel) ? '↻ since view' : '';
+    const wtPart = this.wtOnly?.has(rel) ? 'uncommitted only' : '';
+    // Claude's review order: `#n` + its one-line why, while the sort toggle is on.
+    const step = this.steps().get(rel);
+    const stepPart = step ? `#${step.n}` : '';
+    it.description = [stepPart, groupPart, matchPart, counts, wtPart, commentPart, rePart, dirPart]
+      .filter(Boolean)
+      .join('  ·  ');
     if (hits) it.matches = hits; // makes the row expandable into its matching lines
-    const viewed = isViewed(cwd, getViewed(this.context, this.base), rel);
+    const viewed = viewedNow;
     it.rel = rel;
     it.id = `file:${this.base}:${rel}`; // stable id so reveal() can match across refreshes
     it.resourceUri = vscode.Uri.file(path.join(cwd, rel));
-    // -snap suffix = unviewed but a last-viewed snapshot exists → the row offers "Revert to Last
-    // Viewed" inline. Menu when-clauses match by prefix so the suffix stays invisible to them.
-    const snap = !viewed && !isIgnored && reviewedBlob(getViewed(this.context, this.base), rel);
-    it.contextValue = isIgnored ? 'file-ignored' : viewed ? 'file-viewed' : snap ? 'file-unviewed-snap' : 'file-unviewed';
-    const stageNote = this.staleStaged?.has(rel)
-      ? ' — staged, but modified since (restage before commit)'
-      : this.staged?.has(rel) ? ' — staged' : '';
-    const delNote = this.deleted.has(rel) ? ' — deleted by this branch' : '';
-    it.tooltip = `${rel} — ${isIgnored ? 'untracked' : viewed ? 'viewed' : 'unviewed'}${delNote}${stageNote}`;
+    // Suffixes (menu when-clauses match by prefix/regex so they stay invisible unless asked for):
+    //   -snap   = unviewed with a last-viewed snapshot → row offers "Revert to Last Viewed" inline
+    //   -staged = in the index → drives Stage↔Unstage and View & Stage / Unview & Unstage labels
+    //   -clean  = no uncommitted changes (committed) → Stage / & Stage / Revert Changes all hide
+    const snap = !!rePart;
+    const isClean =
+      !this.staged?.has(rel) && !this.dirty?.has(rel) && this.status.get(rel) !== 'U';
+    const suffix = isIgnored ? '' : this.staged?.has(rel) ? '-staged' : isClean ? '-clean' : '';
+    it.contextValue = isIgnored
+      ? 'file-ignored'
+      : (viewed ? 'file-viewed' : snap ? 'file-unviewed-snap' : 'file-unviewed') + suffix;
+    it.tooltip = this._tooltip(rel, { isIgnored, viewed, snap, isClean, nComments, step });
     // During a search, clicking the row toggles its matches (no command) instead of opening.
     if (!hits) {
       // Added file → open whole file, UNLESS it has a since-review snapshot to diff against.
@@ -457,8 +605,20 @@ class TodoTree {
     return el;
   }
   getChildren(el) {
-    if (el) return [];
     const cwd = getCwd();
+    if (el) {
+      return el.todos.map((t) => {
+        const msg = t.text.replace(/^\s*(\/\/+|#+|\/\*+|\*+|<!--|--)\s?/, '').replace(/\s*(\*\/|-->)\s*$/, '').trim();
+        const it = new vscode.TreeItem(msg || t.text);
+        it.description = `:${t.line}`; // the file is the parent row
+        it.tooltip = `${t.rel}:${t.line}\n\n${t.text}`;
+        it.iconPath = new vscode.ThemeIcon('checklist');
+        it.todo = t; // for multi-select copy
+        it.contextValue = 'vettyTodo'; // gates the row menu/buttons (the "No TODOs" row has none)
+        it.command = { command: 'vetty.openTodo', title: 'Open', arguments: [t.rel, t.line] };
+        return it;
+      });
+    }
     // Slice TODOs by the Review panel's active filter (group / scope / name / search) for a focused view.
     const visible = cwd && app.diffTree ? new Set(app.diffTree.visibleFiles(cwd)) : null;
     const items = visible ? this.items.filter((t) => visible.has(t.rel)) : this.items;
@@ -467,25 +627,37 @@ class TodoTree {
       it.iconPath = new vscode.ThemeIcon('check');
       return [it];
     }
-    return items.map((t) => {
-      const msg = t.text.replace(/^\s*(\/\/+|#+|\/\*+|\*+|<!--|--)\s?/, '').replace(/\s*(\*\/|-->)\s*$/, '').trim();
-      const it = new vscode.TreeItem(msg || t.text);
-      it.description = `${path.basename(t.rel)}:${t.line}`; // filename:line, dimmed
-      it.tooltip = `${t.rel}:${t.line}\n\n${t.text}`;
-      it.iconPath = new vscode.ThemeIcon('checklist');
-      it.todo = t; // for multi-select copy
-      it.contextValue = 'vettyTodo'; // gates the row menu/buttons (the "No TODOs" row has none)
-      it.command = { command: 'vetty.openTodo', title: 'Open', arguments: [t.rel, t.line] };
-      return it;
-    });
+    return fileGroups(cwd, items.map((t) => [t.rel, t]), 'todo').map((g) => ((g.todos = g.entries), g));
   }
+}
+
+/** Parent rows for a per-file list (TODOs, comments): file icon + name, dir + count dimmed, expanded.
+ *  `pairs` = [rel, entry][]; returns TreeItems carrying `.rel` and `.entries` (insertion order kept). */
+function fileGroups(cwd, pairs, kind) {
+  const byRel = new Map();
+  for (const [rel, e] of pairs) (byRel.get(rel) || byRel.set(rel, []).get(rel)).push(e);
+  return [...byRel].map(([rel, entries]) => {
+    const it = new vscode.TreeItem(path.basename(rel), vscode.TreeItemCollapsibleState.Expanded);
+    const dir = path.dirname(rel);
+    it.description = [dir === '.' ? '' : dir, String(entries.length)].filter(Boolean).join('  ·  ');
+    it.tooltip = rel;
+    if (cwd) it.resourceUri = vscode.Uri.file(path.join(cwd, rel)); // → file-type icon
+    it.id = `${kind}-file:${rel}`; // stable → keeps expand state across refreshes
+    it.contextValue = `${kind}File`;
+    it.rel = rel;
+    it.entries = entries;
+    return it;
+  });
+}
+
+/** TODO entries behind tree rows — a file row stands for all its TODOs. */
+function todosOf(items) {
+  return items.flatMap((i) => (i?.todo ? [i.todo] : i?.todos || []));
 }
 
 /** Ctrl/Cmd+C in the Todos view: copy the selected TODOs as `file:line — text`. */
 async function copyTodos() {
-  const lines = (app.todoTreeView?.selection || [])
-    .filter((i) => i.todo)
-    .map((i) => `- ${i.todo.rel}:${i.todo.line} — ${i.todo.text.trim()}`);
+  const lines = todosOf(app.todoTreeView?.selection || []).map((t) => `- ${t.rel}:${t.line} — ${t.text.trim()}`);
   if (!lines.length) return;
   await vscode.env.clipboard.writeText(lines.join('\n'));
   vscode.window.setStatusBarMessage(`Copied ${lines.length} TODO(s)`, 2000);
@@ -499,7 +671,7 @@ async function todoOpenItem(item) {
 /** Copy the clicked TODO row (or the multi-selection) as paste-ready bullets. */
 async function todoCopyItems(item, sel) {
   const items = Array.isArray(sel) && sel.length ? sel : item ? [item] : [];
-  const lines = items.filter((i) => i?.todo).map((i) => `- ${i.todo.rel}:${i.todo.line} — ${i.todo.text.trim()}`);
+  const lines = todosOf(items).map((t) => `- ${t.rel}:${t.line} — ${t.text.trim()}`);
   if (!lines.length) return;
   await vscode.env.clipboard.writeText(lines.join('\n'));
   vscode.window.setStatusBarMessage(`Copied ${lines.length} TODO(s)`, 2000);
@@ -525,8 +697,8 @@ async function openTodo(rel, line) {
   const doc = await vscode.workspace.openTextDocument(uri);
   const l = Math.min(Math.max(line - 1, 0), Math.max(doc.lineCount - 1, 0));
   const text = doc.lineAt(l).text;
-  const m = text.match(core.TODO_RE); // highlight the marker → end of line, like a search hit
-  const sel = m ? new vscode.Range(l, m.index, l, text.length) : new vscode.Range(l, 0, l, 0);
+  const col = todoCol(text); // highlight the marker → end of line, like a search hit
+  const sel = col >= 0 ? new vscode.Range(l, col, l, text.length) : new vscode.Range(l, 0, l, 0);
   await vscode.window.showTextDocument(doc, { selection: sel });
 }
 
@@ -542,16 +714,25 @@ async function openMatch(rel, line, col, len) {
 
 /** Open one file's diff: since-review overlay wins when active; otherwise the range's base.
  *  Deleted files diff against an EMPTY right side (there's no working file to show). */
+/** Open options that land on the file's first comment (else unchanged: editors reveal the first change). */
+function atFirstComment(context, rel, opts = {}) {
+  if (opts.selection || app.diffTree?.deleted?.has(rel)) return opts; // deleted: no right side to scroll
+  const line = require('./comments').firstCommentLine(context, rel);
+  return line === null ? opts : { ...opts, selection: new vscode.Range(line, 0, line, 0) };
+}
+
 function openOneDiff(context, cwd, base, rel, opts) {
   const fileUri = vscode.Uri.file(path.join(cwd, rel));
   const gone = app.diffTree?.deleted?.has(rel);
+  opts = atFirstComment(context, rel, opts); // selection set → the diff editor skips its jump to the first change
   const rightUri = gone ? baseUriFor(fileUri, '') : fileUri; // ref '' → the provider returns ''
   const rightLabel = gone ? 'deleted' : 'working';
   if (hasSinceReviewDiff(context, cwd, base, rel)) {
     const blob = reviewedBlob(getViewed(context, base), rel);
     return vscode.commands.executeCommand('vscode.diff', blobUriFor(fileUri, blob), rightUri, `${rel} (last viewed ↔ ${rightLabel})`, opts);
   }
-  if (diffRange(context) === 'commit') {
+  // Uncommitted-only rows (branch range) have no merge-base diff by definition — show vs HEAD.
+  if (diffRange(context) === 'commit' || app.diffTree?.wtOnly?.has(rel)) {
     // Working tree vs HEAD = uncommitted changes only. New/untracked files → empty left side.
     return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, 'HEAD'), rightUri, `${rel} (uncommitted${gone ? ' ↔ deleted' : ''})`, opts);
   }
@@ -562,7 +743,7 @@ function openOneDiff(context, cwd, base, rel, opts) {
 /** Open a changed file the right way: whole file for new files, else its diff. */
 async function openReviewFile(context, cwd, base, rel, opts = { preview: true }) {
   if (app.diffTree.added.has(rel) && !hasSinceReviewDiff(context, cwd, base, rel)) {
-    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), opts);
+    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), atFirstComment(context, rel, opts));
   } else {
     await openOneDiff(context, cwd, base, rel, opts);
   }
@@ -647,6 +828,32 @@ async function toggleRange(context) {
   vscode.window.setStatusBarMessage(`Range: ${DIFF_RANGE_SHORT[next]}`, 2000);
 }
 
+/** Guided Review: on = Claude's review order + Claude's notes; off = path order, no Claude notes. */
+async function toggleGuidedReview(context) {
+  const next = !core.guidedReviewOn(context);
+  await context.workspaceState.update('vetty.guidedReview', next);
+  await vscode.commands.executeCommand('setContext', 'vetty.guidedReview', next);
+  require('./comments').syncAiThreads(); // show / hide the notes
+  refreshTree();
+  const r = core.claudeReview();
+  if (next && !r?.order.size && !r?.comments.length) {
+    const other = core.claudeReviewFileBranch();
+    vscode.window.showInformationMessage(
+      other && other !== core.activeBranchName()
+        ? `The guided review on disk is for "${other}" — you're on "${core.activeBranchName()}". Ask Claude to "annotate this branch for Vetty".`
+        : 'No guided review for this branch yet. Ask Claude to "annotate this branch for Vetty".'
+    );
+  } else vscode.window.setStatusBarMessage(`Guided review ${next ? 'on' : 'off'}`, 2000);
+}
+
+/** Guided notes expanded ⇄ collapsed in the editor (big-picture notes are always expanded). */
+async function toggleGuidedNotes(context) {
+  const next = !core.guidedNotesExpanded(context);
+  await context.workspaceState.update('vetty.guidedNotesExpanded', next);
+  await vscode.commands.executeCommand('setContext', 'vetty.guidedNotesExpanded', next);
+  require('./comments').applyGuidedNotesState();
+}
+
 /** Since-review overlay toggle: unviewed files diff against your last-reviewed snapshot. */
 async function toggleSinceReview(context) {
   const next = !sinceReviewOn(context);
@@ -657,9 +864,9 @@ async function toggleSinceReview(context) {
 }
 
 module.exports = {
-  DiffTree, TodoTree, fileDecorations,
+  DiffTree, TodoTree, fileDecorations, fileGroups,
   copyTodos, openTodo, openMatch, todoOpenItem, todoCopyItems, exportTodos,
-  openOneDiff, openReviewFile, navigateUnviewed,
+  openOneDiff, openReviewFile, navigateUnviewed, atFirstComment,
   expandAll, collapseFolders, showMore,
-  toggleNesting, toggleWhitespace, toggleRange, toggleSinceReview,
+  toggleNesting, toggleWhitespace, toggleRange, toggleSinceReview, toggleGuidedReview, toggleGuidedNotes,
 };

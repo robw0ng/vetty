@@ -33,6 +33,7 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.commentOpen', (item) => comments.commentOpen(context, item)),
     vscode.commands.registerCommand('vetty.commentEdit', (item) => comments.commentEdit(context, item)),
     vscode.commands.registerCommand('vetty.commentCopy', (item, sel) => comments.commentCopy(context, item, sel)),
+    vscode.commands.registerCommand('vetty.copySection', (item) => comments.copySection(context, item)),
     vscode.commands.registerCommand('vetty.commentDelete', (item, sel) => comments.commentDelete(context, item, sel)),
     vscode.commands.registerCommand('vetty.openTodo', (rel, line) => tree.openTodo(rel, line)),
     vscode.commands.registerCommand('vetty.copyTodos', () => tree.copyTodos()),
@@ -66,6 +67,10 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.diffWholeBranch', () => tree.toggleRange(context)),
     vscode.commands.registerCommand('vetty.sinceReviewOn', () => tree.toggleSinceReview(context)),
     vscode.commands.registerCommand('vetty.sinceReviewOff', () => tree.toggleSinceReview(context)),
+    vscode.commands.registerCommand('vetty.guidedReviewOn', () => tree.toggleGuidedReview(context)),
+    vscode.commands.registerCommand('vetty.guidedNotesExpand', () => tree.toggleGuidedNotes(context)),
+    vscode.commands.registerCommand('vetty.guidedNotesCollapse', () => tree.toggleGuidedNotes(context)),
+    vscode.commands.registerCommand('vetty.guidedReviewOff', () => tree.toggleGuidedReview(context)),
     vscode.commands.registerCommand('vetty.copyPaths', () => cmds.copyPaths()),
     vscode.commands.registerCommand('vetty.showMore', (key) => tree.showMore(key)),
     vscode.commands.registerCommand('vetty.fetch', () => cmds.fetchAndRefresh(context)),
@@ -80,6 +85,7 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.togglePrMode', () => comments.togglePrMode()),
     vscode.commands.registerCommand('vetty.stageViewed', () => cmds.stageViewed(context)),
     vscode.commands.registerCommand('vetty.stageFile', (item, sel) => cmds.stageFiles(context, item, sel)),
+    vscode.commands.registerCommand('vetty.unstageFile', (item, sel) => cmds.unstageFiles(context, item, sel)),
     vscode.commands.registerCommand('vetty.addToGroup', (item, sel) => cmds.addToGroup(context, item, sel)),
     vscode.commands.registerCommand('vetty.removeFromGroup', (item, sel) => cmds.removeFromGroup(context, item, sel)),
     vscode.commands.registerCommand('vetty.stageGroup', () => cmds.stageGroup(context)),
@@ -122,6 +128,8 @@ function activate(context) {
   vscode.commands.executeCommand('setContext', 'vetty.nested', app.diffTree.nested);
   vscode.commands.executeCommand('setContext', 'vetty.diffRange', core.diffRange(context));
   vscode.commands.executeCommand('setContext', 'vetty.sinceReview', core.sinceReviewOn(context));
+  vscode.commands.executeCommand('setContext', 'vetty.guidedReview', core.guidedReviewOn(context));
+  vscode.commands.executeCommand('setContext', 'vetty.guidedNotesExpanded', core.guidedNotesExpanded(context));
   vscode.commands.executeCommand('setContext', 'vetty.hideWhitespace', app.diffTree.hideWhitespace);
   vscode.commands.executeCommand('setContext', 'vetty.reviewing', !!context.workspaceState.get(core.REVIEW_KEY));
   comments.updatePrTitle(context);
@@ -143,9 +151,21 @@ function activate(context) {
       core.watchGitDir(context, app.bumpReload);
       // Working files, all roots. VS Code applies files.watcherExclude (node_modules, etc.) automatically.
       const fileWatcher = vscode.workspace.createFileSystemWatcher('**/*');
-      fileWatcher.onDidChange(app.bumpReload);
-      fileWatcher.onDidCreate(app.bumpReload);
-      fileWatcher.onDidDelete(app.bumpReload);
+      // ...but its default excludes cover .git/objects only, NOT refs, logs, or index. Every git
+      // command writes some of those, so without this filter a reload schedules another reload.
+      // The .git files that genuinely matter are watchGitDir's job (HEAD, ORIG_HEAD, index).
+      const bumpWorkingFile = (uri) => {
+        const p = (uri?.fsPath ?? String(uri)).replace(/\\/g, '/');
+        // Both the contents AND the directory itself. Every git write goes through .git/index.lock,
+        // and creating/removing that file mutates the .git DIRECTORY — which VS Code reports as a
+        // change to `.../.git`, a path containing no '/.git/' segment. Miss that and the reload
+        // loop survives with its index events already suppressed: a different door, same room.
+        if (p.includes('/.git/') || p.endsWith('/.git')) return;
+        app.bumpReload(uri);
+      };
+      fileWatcher.onDidChange(bumpWorkingFile);
+      fileWatcher.onDidCreate(bumpWorkingFile);
+      fileWatcher.onDidDelete(bumpWorkingFile);
       context.subscriptions.push(fileWatcher);
       await core.detectGh(cwd);
       await core.pruneStaleState(context, cwd); // GC stale per-base state (deleted branches)

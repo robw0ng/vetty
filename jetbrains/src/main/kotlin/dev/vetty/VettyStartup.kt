@@ -21,6 +21,7 @@ import git4idea.repo.GitRepositoryChangeListener
 class VettyStartup : ProjectActivity {
     override suspend fun execute(project: Project) {
         val conn = project.messageBus.connect()
+        project.service<VettyService>().startClaudeWatch()   // Claude review file → reload when it changes
 
         // Decorate any editor as it's created — covers normal tabs AND the editors inside diff viewers.
         EditorFactory.getInstance().addEditorFactoryListener(object : EditorFactoryListener {

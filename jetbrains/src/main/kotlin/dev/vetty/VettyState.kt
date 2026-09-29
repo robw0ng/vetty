@@ -20,6 +20,9 @@ class VettyStateService : PersistentStateComponent<VettyStateService.S> {
         var anchor: String = ""    // trimmed text of the start line, for content re-anchoring
         var body: String = ""
         var branch: String = ""    // branch the comment was made on — comments are branch-scoped
+        // Claude context note from the review file (never persisted here; delete edits that file).
+        @get:com.intellij.util.xmlb.annotations.Transient var ai: Boolean = false
+        @get:com.intellij.util.xmlb.annotations.Transient var big: Boolean = false   // Claude "big-picture" note (file's role in the branch)
     }
 
     class S {
@@ -31,6 +34,7 @@ class VettyStateService : PersistentStateComponent<VettyStateService.S> {
         var nested: Boolean = false       // tree (nested folders) vs flat list
         var hideWhitespace: Boolean = false  // hide files whose changes are whitespace-only
         var stageOnView: Boolean = false     // marking viewed also stages the file (reviewed ⇒ staged)
+        var guidedReview: Boolean = false     // Guided Review: Claude's review order + notes (off: path order, notes hidden)
         var welcomed: Boolean = false     // first-run welcome dismissed
         // ponytail: viewed key is "base\trel" → git blob id. Flat Map<String,String> serializes
         // reliably (nested maps don't). The blob id IS the content hash and the since-review snapshot.

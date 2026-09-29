@@ -13,7 +13,7 @@ what changed since your last pass.
 
 | Feature                                                    | What it does                                                                                                | Why it helps                                   |
 | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| **Review changed files**                                   | Every file changed vs a branch or your working tree, grouped Unviewed / Viewed / Untracked                  | The whole scope of work in one place           |
+| **Review changed files**                                   | Every file changed vs a branch or your working tree, grouped Unviewed / Viewed / Untracked. Changes committed and then undone in the working tree still show, tagged *uncommitted only* | The whole scope of work in one place           |
 | **Auto base branch**                                       | Infers the current branch's direct parent (closest ancestor); merge-base diff like GitHub's "files changed" | Right base, accurate change list, no setup     |
 | **Viewed tracking**                                        | Mark files viewed; edit one and it re-flags unviewed (content-hash); progress + auto-advance                | Always know what you've actually reviewed      |
 | **Since-last-review diff**                                 | Unviewed files diff against the version you last reviewed                                                   | See only what's*new*, not the whole file again |
@@ -23,9 +23,10 @@ what changed since your last pass.
 | **Multi-root**                                             | `Vetty: Pick Workspace Folder` chooses which folder (repo) to review                                        | Works in multi-folder workspaces               |
 | **Hide whitespace-only**                                   | Drop files whose only change is formatting                                                                  | Real changes stop hiding in reformat noise     |
 | **Track / Untrack**                                        | Push noise files (lockfiles, generated) into their own section                                              | Focus only on what matters                     |
-| **TODO scanner**                                           | Lists new TODO/FIXME/etc added in the branch                                                                | Catch leftover markers before they ship        |
+| **TODO scanner**                                           | Lists new TODO/FIXME/etc added in the branch, grouped by file. Only real markers count (`// TODO`, `# FIXME`, `TODO:`), not identifiers like `%TEMP%` | Catch leftover markers before they ship        |
 | **Auto-refresh**                                           | Reloads on any file/git change, including AI edits with no save                                             | Tree stays current, no manual refresh          |
 | **Stage viewed**                                           | One click stages every file you marked viewed                                                               | Bridge from review straight to a commit        |
+| **Claude review order + notes**                            | A Claude session writes a review order and short context notes; toggle sorting into that order, notes show inline | Read AI-written changes in the order that makes sense, with the why beside the code |
 | **PR review** _(experimental, off by default; needs `gh`)_ | Check out a PR, see its comments inline, submit Comment/Approve/Request-changes                             | Two-way PR review without leaving the editor   |
 
 ## For AI pair programming
@@ -58,6 +59,27 @@ paste back → the agent fixes exactly those → **since-last-review** shows you
 
 `branch` · `refresh` · `diff-mode (since-review / full)` · `tree / flat` · `export comments` · `clear comments`
 
+## Claude review order + notes
+
+Ask any Claude Code session to **"annotate this branch for Vetty"**. It writes
+`<git-dir>/vetty/claude-review.json` (one per worktree, tied to the branch):
+
+- **order**: files in an intuitive review order, each with a one-line why.
+- **comments**: short context notes at specific lines (bullets, tables for state matrices).
+
+Vetty picks it up live. Turn on **Guided Review** (VS Code: Review view **⋯** menu; Rider: toolbar):
+
+- **On**: Unviewed/Viewed follow Claude's order, each row shows `#n` (the why is in its tooltip), `j`/`k` follow it,
+  and Claude's notes appear inline and in the Comments sidebar as read-only "Claude" threads.
+- **Off**: regular path order, and Claude's notes are hidden.
+
+Deleting a note removes it from the file; **Vetty: Clear Guided Review** (command palette) removes
+the whole guided review. Notes are context, not change requests: they never block
+stage-on-view and aren't exported.
+
+The Claude side is the `vetty-review` skill in [`skills/vetty-review`](skills/vetty-review/SKILL.md).
+Install it once for every session: copy that folder to `~/.claude/skills/`.
+
 ## Pull request review (optional)
 
 With the **GitHub CLI (`gh`)** installed and authenticated (`gh auth login`), Vetty can review
@@ -65,7 +87,8 @@ teammate PRs end to end:
 
 1. Click the **pull-request** button → pick an open PR → Vetty checks it out and diffs it against
    its base branch (`origin/<base>`, fetched fresh). The PR's existing review comments appear inline
-   as read-only threads.
+   as read-only threads, and in the sidebar's Comments section. **Delete** hides a PR comment locally
+   (GitHub is untouched; it stays hidden across re-pulls and restarts).
 2. Review files, mark them viewed, leave inline comments.
 3. **Submit Review** → choose **Comment**, **Approve**, or **Request changes** → your local comments
    post to the PR as one review.

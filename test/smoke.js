@@ -56,6 +56,62 @@ assert.deepStrictEqual(todos, [
     'trailing tab on spaced paths stripped');
 }
 
+// TODO_RE: a marker needs a comment leader or a `LABEL:` shape — identifiers like %TEMP% /
+// $env:TEMP / `TEMP` in prose flooded the TODO list (real false positives from a PowerShell repo).
+{
+  const { TODO_RE, todoCol } = require('../lib');
+  for (const s of ['%TEMP%\\logs\\x.log', '# Spelled the long way: $env:TEMP is short', '$env:TEMP = $Shell',
+    'shell whose `TEMP` is the 8.3 spelling', '# child: TEMP spelled as asked', 'a * TEMP_FACTOR'])
+    assert.ok(!TODO_RE.test(s), `not a marker: ${s}`);
+  for (const s of ['// TODO fix', '# FIXME: x', '/* HACK */', ' * NOTE: y', '<!-- WIP -->', 'x(); // TODO(rob): later', '- NOTE: md'])
+    assert.ok(TODO_RE.test(s), `marker: ${s}`);
+  assert.strictEqual(todoCol('x(); // TODO: y'), 8, 'column points at the keyword, not the leader');
+}
+
+// Claude review file: branch-scoped, order dedups + keeps notes, lines 1→0-based, bad entries skipped;
+// delete matches by file+line+body; relocate follows the anchor text when code moves.
+{
+  const { parseClaudeReview, removeClaudeComments, relocate } = require('../lib');
+  const text = JSON.stringify({
+    branch: 'feat',
+    order: ['src/a.js', { file: '.\\src\\b.js', note: 'callers' }, 'src/a.js'],
+    comments: [
+      { file: 'src/a.js', line: 3, endLine: 5, anchor: '  const x = 1;  ', kind: 'big-picture', body: '- why' },
+      { file: 'src/a.js', line: 0, body: 'bad line' },
+      { file: 'src/b.js', line: 2, body: '' },
+    ],
+  });
+  assert.strictEqual(parseClaudeReview(text, 'other'), null, 'other branch → hidden');
+  const r = parseClaudeReview(text, 'feat');
+  assert.deepStrictEqual([...r.order], [['src/a.js', { i: 0, note: '' }], ['src/b.js', { i: 1, note: 'callers' }]]);
+  assert.deepStrictEqual(r.comments, [{ file: 'src/a.js', line: 2, endLine: 4, anchor: 'const x = 1;', body: '- why', big: true }]);
+  assert.strictEqual(parseClaudeReview('{nope', 'feat'), null, 'garbage → null');
+  const left = JSON.parse(removeClaudeComments(text, r.comments)).comments;
+  assert.strictEqual(left.length, 2, 'only the matching note removed');
+  assert.strictEqual(relocate(['a', 'b', 'const x = 1;', 'c'], 0, 'const x = 1;'), 2, 'moved line found');
+  assert.strictEqual(relocate(['a'], 5, 'gone'), 5, 'missing anchor keeps stored line');
+}
+
+// tablesToText: GFM table → aligned fenced block (cells padded, ** / ` stripped); other lines untouched.
+{
+  const { tablesToText } = require('../lib');
+  const out = tablesToText('- intro\n\n| Pick | Checked |\n|---|---|\n| `own` template | **shared**, active |\n| a | b |\n\n- after');
+  assert.strictEqual(out, [
+    '- intro', '',
+    '```text',
+    '┌──────────────┬────────────────┐',
+    '│ Pick         │ Checked        │',
+    '╞══════════════╪════════════════╡',
+    '│ own template │ shared, active │',
+    '├──────────────┼────────────────┤',
+    '│ a            │ b              │',
+    '└──────────────┴────────────────┘',
+    '```',
+    '', '- after',
+  ].join('\n'));
+  assert.strictEqual(tablesToText('a | b'), 'a | b', 'not a table → unchanged');
+}
+
 // globToRegex: ignore-pattern semantics — ** crosses slashes, * doesn't, /-containing anchors to path.
 {
   const m = (pat, rel) => { const re = globToRegex(pat); return !!re && re.test(rel); };
@@ -136,6 +192,71 @@ assert.ok(
     fs.writeFileSync(path.join(dir, goneRel), 'resurrected\n');
     assert.ok(!core.isViewed(dir, tomb, goneRel), 'tombstone unviewed once the file returns');
     fs.rmSync(dir, { recursive: true, force: true });
-    console.log('ok — all smoke checks passed');
+    return ownIndexWritesAreSuppressed();
   });
+}
+
+// `git diff` refreshes the index's stat cache and WRITES .git/index — and load() runs six of them.
+// The .git watcher fires on that write and schedules a reload, which runs the reads again: an
+// endless ~400ms refresh loop. (--no-optional-locks stops this for `status` but NOT for `diff`.)
+// core.isSelfIndexWrite is what breaks it, so both its directions are pinned here.
+function ownIndexWritesAreSuppressed() {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const Module = require('module');
+  const { execFileSync } = require('child_process');
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vetty-locks-')));
+  const g = (...a) => execFileSync('git', a, { cwd: dir, stdio: 'pipe' });
+  const clean = () => fs.rmSync(dir, { recursive: true, force: true });
+  const idxUri = { fsPath: path.join(dir, '.git', 'index') };
+
+  // A fresh core whose workspace is the temp repo (resolveRepoRoot needs a folder to look at).
+  delete require.cache[require.resolve('../src/core.js')];
+  const origLoad = Module._load;
+  Module._load = (r, p, m) => (r === 'vscode'
+    ? {
+        EventEmitter: class { get event() { return () => {}; } fire() {} },
+        workspace: { workspaceFolders: [{ uri: { fsPath: dir } }], getConfiguration: () => ({ get: (_k, d) => d }) },
+        window: {}, commands: {}, Uri: {}, RelativePattern: class {},
+      }
+    : origLoad(r, p, m));
+  const core = require('../src/core.js');
+  Module._load = origLoad;
+
+  g('init', '-q');
+  g('config', 'user.email', 't@t');
+  g('config', 'user.name', 't');
+  fs.writeFileSync(path.join(dir, 'a.js'), 'x\n');
+  g('add', '-A');
+  g('commit', '-qm', 'init');
+  let bump = 0;
+  const dirty = () => {
+    // Same content, DISTINCT new mtime → the index's stat cache is stale, so the next read
+    // rewrites it. Distinct matters: reusing one timestamp leaves the index already matching,
+    // and the read then writes nothing.
+    const t = new Date(Date.now() + 4000 * ++bump);
+    fs.utimesSync(path.join(dir, 'a.js'), t, t);
+  };
+
+  return core.resolveRepoRoot()
+    .then(() => {
+      dirty();
+      return core.git(dir, ['diff', '--name-status', 'HEAD']);
+    })
+    .then(() => {
+      assert.ok(core.isSelfIndexWrite(idxUri), "vetty's own index write must not schedule a reload");
+      // An index write vetty did NOT make still counts as news.
+      dirty();
+      execFileSync('git', ['diff', '--name-status', 'HEAD'], { cwd: dir, stdio: 'pipe' });
+      assert.ok(!core.isSelfIndexWrite(idxUri), 'an external index write must still schedule a reload');
+      // HEAD is never suppressed, whatever the index looks like.
+      assert.ok(!core.isSelfIndexWrite({ fsPath: path.join(dir, '.git', 'HEAD') }), 'HEAD is never suppressed');
+      clean();
+      console.log('ok — all smoke checks passed');
+    })
+    .catch((e) => {
+      clean();
+      throw e;
+    });
 }
