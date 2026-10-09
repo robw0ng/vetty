@@ -7,7 +7,10 @@ const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
 const { promisify } = require('util');
-const { parseAheadBehind, parseTodoHunks, eolNormalize, parseClaudeReview, removeClaudeComments } = require('../lib');
+const {
+  parseAheadBehind, parseTodoHunks, eolNormalize, parseClaudeReview, removeClaudeComments,
+  parseBranchTips, parseFirstParents, branchTree, parseWorktrees,
+} = require('../lib');
 
 const execFileAsync = promisify(cp.execFile);
 
@@ -69,6 +72,7 @@ async function resolveRepoRoot() {
 // in, the stamp won't match and the reload happens as normal; the cost of losing is one extra
 // reload, never a missed change.
 let selfIndexMtime = 0;
+const INDEX_WRITES = new Set(['add', 'restore', 'reset', 'rm', 'mv', 'commit', 'checkout', 'switch', 'stash', 'apply', 'merge', 'rebase', 'cherry-pick']);
 function indexPath() {
   return gitDir ? path.join(gitDir, 'index') : null;
 }
@@ -226,7 +230,10 @@ async function git(cwd, args) {
   // (`status` does; `diff` does NOT — stampIndexMtime below is what covers the rest).
   // core.quotePath=false → non-ASCII paths come out raw (not octal-escaped), so path joins resolve.
   const { stdout } = await execFileAsync('git', ['--no-optional-locks', '-c', 'core.quotePath=false', ...args], { cwd, maxBuffer: 16 * 1024 * 1024 });
-  stampIndexMtime(); // this call may have rewritten .git/index; don't let the watcher call it news
+  // Reads rewrite the index's stat cache — that's noise. Writes (add/restore/…) change what the tree
+  // shows (stage markers), so leave them un-stamped: the watcher's next event is real news and reloads.
+  if (INDEX_WRITES.has(args[0])) selfIndexMtime = 0;
+  else stampIndexMtime(); // this call may have rewritten .git/index; don't let the watcher call it news
   if (debugOn) dbg(`git ${args.slice(0, 4).join(' ')}${args.length > 4 ? ' …' : ''} — ${Date.now() - t0}ms`);
   return stdout;
 }
@@ -677,6 +684,10 @@ async function branchCreatedAt(cwd, branch) {
 // ahead). A branch at the SAME tip that was created earlier is the parent of a fresh stacked branch
 // (diff = working changes only — not the parent's commits). Falls back to a conventional base branch,
 // then the most recent other branch.
+// Now the terminal picker rule (lib.branchTree): first-parent walk from the tip to the first commit holding
+// another branch's tip, reflog birth for same-tip ties, trunk fallback only when the branch reaches
+// that trunk's history. Two git calls for every branch (no 50-branch cap), and the picker's tree and
+// the inferred base can't disagree — the old ahead/behind scan rooted stacked branches on develop.
 async function defaultBase(cwd) {
   const cur = await currentBranch(cwd);
   const names = await localBranches(cwd);
@@ -684,33 +695,8 @@ async function defaultBase(cwd) {
   // On the trunk itself there's no parent — every merged feature branch looks like an ancestor.
   // Default to the current branch = uncommitted working changes.
   if (cur && TRUNK_NAMES.includes(cur)) return cur;
-  const others = names.filter((n) => n !== cur).slice(0, MAX_REL_BRANCHES);
-
-  let parent = null;
-  let parentAhead = Infinity;
-  const sameTip = [];
-  await Promise.all(
-    others.map(async (b) => {
-      const ab = await aheadBehind(cwd, b);
-      if (!ab) return;
-      if (ab.behind === 0 && ab.ahead === 0) sameTip.push(b);
-      else if (ab.behind === 0 && ab.ahead > 0 && ab.ahead < parentAhead && ab.ahead <= PARENT_MAX_AHEAD) {
-        parentAhead = ab.ahead;
-        parent = b;
-      }
-    })
-  );
-  // Same-tip branch created before this one = the direct parent (this branch has no commits yet).
-  if (sameTip.length && cur) {
-    const curBorn = await branchCreatedAt(cwd, cur);
-    let best = null;
-    let bestBorn = -Infinity;
-    for (const b of sameTip) {
-      const born = await branchCreatedAt(cwd, b);
-      if (born < curBorn && born > bestBorn) (bestBorn = born), (best = b);
-    }
-    if (best) return best;
-  }
+  const tree = await branchTreeData(cwd);
+  const parent = tree.rows.find((r) => r.name === cur)?.parent;
   if (parent) return parent;
   for (const c of TRUNK_NAMES) {
     if (c !== cur && names.includes(c)) return c;
@@ -718,6 +704,27 @@ async function defaultBase(cwd) {
   // No parent / no other branch (e.g. on the base branch itself) → diff against the current branch,
   // which shows just the uncommitted working changes. Never leave the user with nothing to pick.
   return names.filter((n) => n !== cur)[0] || cur || null;
+}
+
+/** Every local branch as a tree + its graph column (bottom-up: trunk at the foot, stacks growing
+ *  upward) + which branch is checked out in which other worktree. Two git calls plus one worktree
+ *  list; reflog births only for same-tip ties. Feeds the picker and defaultBase. */
+async function branchTreeData(cwd) {
+  const [tipsOut, logOut, wtOut] = await Promise.all([
+    git(cwd, ['for-each-ref', '--format=%(objectname) %(refname:short)', '--sort=-committerdate', 'refs/heads']),
+    // --branches, not --all: remotes/tags would spend the walk budget; past the horizon a stacked
+    // branch loses its parent and gets re-rooted as a peer of main.
+    git(cwd, ['log', '--branches', '--first-parent', '--format=%H %P', '-n', '4000']).catch(() => ''),
+    git(cwd, ['worktree', 'list', '--porcelain']).catch(() => ''),
+  ]);
+  const rows = await branchTree({
+    tips: parseBranchTips(tipsOut),
+    firstParents: parseFirstParents(logOut),
+    trunks: TRUNK_NAMES,
+    birthOf: (b) => branchCreatedAt(cwd, b),
+    maxAhead: PARENT_MAX_AHEAD,
+  });
+  return { rows, worktrees: parseWorktrees(wtOut, cwd) };
 }
 
 // Base is remembered per current branch, so switching branches restores that branch's base (and a
@@ -916,7 +923,7 @@ module.exports = {
   getViewed, setViewed, viewedHash, reviewedBlob, isViewed, viewedEntry, viewedEntries,
   getIgnored, setIgnored, ignoredByPattern, resetIgnorePatterns, getGroups, setGroups, groupNames,
   activeRelPath, aheadBehind, MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,
-  currentBranch, localBranches, defaultBase, branchCreatedAt, setBaseFor, resolveBase, lastBranch, pruneStaleState,
+  currentBranch, localBranches, defaultBase, branchTreeData, branchCreatedAt, setBaseFor, resolveBase, lastBranch, pruneStaleState,
   purgeOnMergeBaseChange,
   updateViewedContext, shortRef,
   DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff,

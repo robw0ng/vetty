@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.106",
+  "version": "0.0.111",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -85,7 +85,7 @@
       },
       {
         "command": "vetty.treePickBranch",
-        "title": "Change Branch",
+        "title": "Change Base Branch",
         "icon": "$(git-branch)"
       },
       {

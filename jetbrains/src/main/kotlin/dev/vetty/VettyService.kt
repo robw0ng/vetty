@@ -232,28 +232,50 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             ?.let { Regex("""@\{(\d+)\}""").find(it)?.groupValues?.get(1)?.toLongOrNull() }
             ?: Long.MAX_VALUE   // no reflog → can't claim parenthood
 
-    /** Same-tip parent → closest ancestor → conventional local → most-recent other local → current branch. */
+    /** Tree parent (the terminal picker rule, see VettyParse.branchTree) → conventional local → most-recent
+     *  other local → current branch. Two git calls for every branch instead of one per branch, and the
+     *  picker's BASE chip and the inferred base can't disagree (the old ahead/behind scan could root a
+     *  stacked branch on develop). */
     private fun inferClosestAncestor(cur: String): String {
         if (cur in TRUNKS) return cur   // a trunk has no parent; every merged branch is an "ancestor" → diff working changes
         val others = branches().filter { it != cur }
-        var best: String? = null; var bestAhead = Int.MAX_VALUE
-        val sameTip = ArrayList<String>()
-        for ((b, ab) in parMap(others.take(50)) { it to aheadBehind(it) }) {   // parallel — 50 sequential spawns stall the load
-            val (behind, ahead) = ab ?: continue
-            if (behind == 0 && ahead == 0) sameTip.add(b)
-            else if (behind == 0 && ahead in 1..PARENT_MAX_AHEAD && ahead < bestAhead) { best = b; bestAhead = ahead }
-        }
-        // Same-tip branch created before this one = the direct parent (this branch has no commits yet).
-        if (sameTip.isNotEmpty()) {
-            val curBorn = branchCreatedAt(cur)
-            sameTip.map { it to branchCreatedAt(it) }
-                .filter { it.second < curBorn }
-                .maxByOrNull { it.second }?.let { return it.first }
-        }
-        if (best != null) return best
+        branchTreeData().rows.firstOrNull { it.name == cur }?.parent?.ifEmpty { null }?.let { return it }
         for (c in TRUNKS) if (c in others) return c
         recentBranch(others)?.let { return it }
         return cur   // diff against self = uncommitted working changes only
+    }
+
+    class BranchTreeData(val rows: List<VettyParse.BranchRow>, val worktrees: Map<String, String>)
+
+    /** Every local branch as a tree + which branch is checked out in which other worktree. Two git
+     *  calls plus one worktree list; reflog births only for same-tip ties. Feeds the picker and the base. */
+    fun branchTreeData(): BranchTreeData {
+        val outs = parMap(listOf(
+            listOf("for-each-ref", "--format=%(objectname) %(refname:short)", "--sort=-committerdate", "refs/heads"),
+            // --branches, not --all: remotes/tags would spend the walk budget and re-root stacked branches.
+            listOf("log", "--branches", "--first-parent", "--format=%H %P", "-n", "4000"),
+            listOf("worktree", "list", "--porcelain"),
+        )) { git(*it.toTypedArray()) }
+        val rows = VettyParse.branchTree(VettyParse.parseBranchTips(outs[0]), VettyParse.parseFirstParents(outs[1]),
+            TRUNKS, { branchCreatedAt(it) }, PARENT_MAX_AHEAD)
+        return BranchTreeData(rows, VettyParse.parseWorktrees(outs[2], repoRoot() ?: ""))
+    }
+
+    /** One picker row, bottom-up order (trunk at the foot). BASE = the base in use now. */
+    class PickRow(val name: String, val cells: List<VettyParse.GraphCell>, val noTrunk: Boolean, val current: Boolean,
+                  val base: Boolean, val trunk: Boolean, val worktree: String)
+
+    fun basePickerRows(): List<PickRow> {
+        val cur = currentBranch()
+        val tree = branchTreeData()
+        val rows = tree.rows.reversed()
+        val g = VettyParse.layoutBranchGraph(rows, cur, TRUNKS)
+        val using = base()
+        return rows.mapIndexed { i, r ->
+            PickRow(r.name, g.cells[i], noTrunk = g.lines[i].any { it == '◇' || it == '◈' } && r.parent.isEmpty(),
+                current = r.name == cur, base = r.name == using && r.name != cur, trunk = r.name in TRUNKS,
+                worktree = if (r.name != cur) tree.worktrees[r.name] ?: "" else "")
+        }
     }
 
     private fun recentBranch(others: List<String>): String? =

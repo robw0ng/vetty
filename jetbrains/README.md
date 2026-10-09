@@ -10,7 +10,7 @@ Works in Rider and every other JetBrains IDE (depends only on the platform, not 
 ## Features (v0.1)
 
 - **Changed-files tool window** (right dock) — `git diff` vs the base branch + untracked files, with `+/-` counts, in collapsible Search / Review / TODOs / Comments sections.
-- **Auto base branch** — infers the branch's direct parent (closest ancestor); the picker labels every branch parent / ancestor / descendant / diverged.
+- **Auto base branch** — infers the branch's parent by walking first-parent history to the nearest branch tip (same rule as the terminal picker). **Change Base** opens the tree picker: trunk at the foot, stacks growing upward, you-are-here, cyan CURRENT BASE, `⌂` worktree markers; type to filter, ↑↓ Enter Esc.
 - **Viewed tracking** — mark a file viewed (snapshots a git blob); edit it and it re-flags unviewed automatically (unsaved edits count). Auto-advance opens the next unviewed file.
 - **Search section** — filter files by name, scope dropdown (All / Unviewed / Added / Modified), and a content search over the shown files with case / whole-word / regex toggles. Matches fold into the tree as child rows (per-file match counts); clicking one opens the file with the match selected. Header shows `⚠ filtered: X of Y` whenever anything is hidden.
 - **Hide whitespace-only changes** — toolbar toggle drops files whose only change is formatting.

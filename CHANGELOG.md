@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.0.112 (unreleased)
+
+- **Fix (VS Code):** `*` / `^` stage markers update right after View/Unview, Stage/Unstage and
+  Revert. The self-index-write filter (which stops the refresh loop from Vetty's own `git diff`
+  reads) was also swallowing Vetty's own `git add` / `git restore`, so the tree only caught up on
+  the next unrelated change.
+
+## 0.0.107 – 0.0.111
+
+- **Branch picker is the terminal picker's tree** (VS Code). Trunk at the foot, stacks growing upward, every
+  branch above its parent, forks in their own lane joined with `┴`/`┘`; `◉` you are here, cyan
+  **BASE** chip on the inferred parent, `(trunk)` / `(detached)`, `⌂ <worktree>` for branches checked
+  out elsewhere; one palette colour per branch. All local branches (the 50-branch cap is gone), type
+  to filter, ↑↓ Enter Esc. Opens as an editor tab (QuickPick can't draw lanes); the old list is the
+  fallback if the tree can't be built. Lanes are drawn as SVG, not box-drawing text (fallback-font
+  glyphs never line up); you-are-here is white and BASE cyan, hardcoded so they always pop.
+  Wording is about picking a base, not diffing: "Pick the base branch" + a one-line why, the toolbar
+  button is "Change Base Branch" (was "Change Branch", which read as checkout). **CURRENT BASE** marks the
+  base in use now (not the inferred parent), and the cursor no longer pre-highlights it. "(no trunk)"
+  instead of "(detached)". The key hint is pinned to the bottom and says what Enter does on your own
+  branch (review uncommitted changes only).
+- **Base inference uses the same rule as the tree**: first-parent walk to the first commit holding
+  another branch's tip, reflog birth for same-tip ties, trunk fallback only when the branch reaches
+  that trunk's history. Two git calls instead of one per branch, and the picker's BASE chip and the
+  inferred base can't disagree (the old ahead/behind scan could root a stacked branch on develop).
+  A base you picked by hand is untouched.
+- **Rider gets the same picker** (lanes painted with Graphics2D, hover moves the cursor, type to
+  filter) and the same inference rule; the old ranked list is its fallback too.
+
 ## 0.0.106
 
 UI/UX declutter pass. Both editors unless noted.

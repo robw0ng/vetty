@@ -41,9 +41,25 @@ async function pickFolder(context) {
   await app.diffTree.load();
 }
 
-/** Branch picker — local branches, labeled by their relationship to the current branch (parent /
- *  ancestor / descendant / diverged), with the inferred direct parent surfaced first. */
+/** Branch picker: the terminal-picker-style tree webview (src/branchpick.js). The flat QuickPick below
+ *  stays as the fallback if the tree can't be built (odd repos: unborn HEAD, no reflog). */
 async function pickBranch(context, cwd) {
+  let base;
+  try {
+    base = await require('./branchpick').pickBranchTree(context, cwd);
+  } catch (e) {
+    core.dbg(`tree picker failed, falling back to the list: ${e.message}`);
+    base = await pickBranchList(context, cwd);
+  }
+  if (!base) return null;
+  await setBaseFor(context, await currentBranch(cwd), base); // remember per current branch
+  updateViewedContext(context);
+  return base;
+}
+
+/** Fallback picker — local branches, labeled by their relationship to the current branch (parent /
+ *  ancestor / descendant / diverged), with the inferred direct parent surfaced first. */
+async function pickBranchList(context, cwd) {
   const last = lastBranch(context);
   const itemsPromise = (async () => {
     const cur = await currentBranch(cwd);
@@ -105,11 +121,7 @@ async function pickBranch(context, cwd) {
   const pick = await vscode.window.showQuickPick(itemsPromise, {
     placeHolder: 'Diff against which local branch?',
   });
-  if (!pick) return null;
-  const base = pick.branch;
-  await setBaseFor(context, await currentBranch(cwd), base); // remember per current branch
-  updateViewedContext(context);
-  return base;
+  return pick ? pick.branch : null;
 }
 
 /** Files this branch changed vs base (merge-base, committed + uncommitted), deletes excluded. */

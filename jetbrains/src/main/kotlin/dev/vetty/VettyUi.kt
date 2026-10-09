@@ -1045,11 +1045,18 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     /** Ancestry-labeled base picker (parent / ancestor / descendant / diverged), shown under [under] or the tree. */
     private fun chooseBase(under: java.awt.Component?) {
-        // rankedBranches spawns a git process per branch — run off the EDT, then show the popup on it.
+        // The tree needs git — build it off the EDT, then show the picker on it. The old ranked list
+        // stays as the fallback if the tree can't be built (unborn HEAD, no reflog).
         ApplicationManager.getApplication().executeOnPooledThread {
-            val items = svc.rankedBranches()
-            val curBase = svc.base()
-            ApplicationManager.getApplication().invokeLater({ showBasePopup(items, curBase, under) }, ModalityState.any())
+            val rows = try { svc.basePickerRows() } catch (e: Exception) { VettyService.dbg { "tree picker failed: ${e.message}" }; null }
+            if (rows == null || rows.isEmpty()) {
+                val items = svc.rankedBranches(); val curBase = svc.base()
+                ApplicationManager.getApplication().invokeLater({ showBasePopup(items, curBase, under) }, ModalityState.any())
+                return@executeOnPooledThread
+            }
+            ApplicationManager.getApplication().invokeLater({
+                VettyBasePicker(project, rows) { b -> offEdt { svc.setBase(b); svc.setWelcomed() } }.show()
+            }, ModalityState.any())
         }
     }
 

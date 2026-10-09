@@ -14,7 +14,8 @@ what changed since your last pass.
 | Feature                                                    | What it does                                                                                                | Why it helps                                   |
 | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
 | **Review changed files**                                   | Every file changed vs a branch or your working tree, grouped Unviewed / Viewed / Ignored. Changes committed and then undone in the working tree still show, tagged *uncommitted only* | The whole scope of work in one place           |
-| **Auto base branch**                                       | Infers the current branch's direct parent (closest ancestor); merge-base diff like GitHub's "files changed" | Right base, accurate change list, no setup     |
+| **Auto base branch**                                       | Infers the branch's parent by walking first-parent history to the nearest branch tip (reflog breaks same-tip ties); merge-base diff like GitHub's "files changed" | Right base, accurate change list, no setup     |
+| **Branch tree picker**                                     | Change Base Branch opens every local branch as a stack tree: trunk at the foot, forks in lanes, you-are-here, CURRENT BASE, worktree markers; type to filter | See the whole stack, pick the right base in one keystroke |
 | **Viewed tracking**                                        | Mark files viewed; edit one and it re-flags unviewed (content-hash); progress + auto-advance                | Always know what you've actually reviewed      |
 | **Since-last-review diff**                                 | Unviewed files diff against the version you last reviewed                                                   | See only what's*new*, not the whole file again |
 | **Inline comments**                                        | PR-style notes that persist and re-anchor by content when a file is rewritten                               | Notes survive AI edits instead of drifting     |
@@ -52,7 +53,7 @@ paste back → the agent fixes exactly those → **since-last-review** shows you
 
 1. Open a git repo folder.
 2. Click the **Vetty** icon in the Activity Bar.
-3. It auto-picks a base branch (main/master/…) — or click the branch button to choose one.
+3. It auto-picks a base branch (the branch this one was cut from, else main/master/…) — or click **Change Base Branch** for the tree picker: trunk at the bottom, stacks growing upward, `◉` you are here, cyan **CURRENT BASE**, `⌂` for branches checked out in another worktree. Type to filter, ↑↓ Enter Esc.
 4. Walk the **Review** list: click a file to diff it, mark it viewed, leave comments.
 
 ## Toolbar

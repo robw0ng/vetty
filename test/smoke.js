@@ -112,6 +112,29 @@ assert.deepStrictEqual(todos, [
   assert.strictEqual(tablesToText('a | b'), 'a | b', 'not a table → unchanged');
 }
 
+// Branch tree (terminal picker port): parents from the first-parent walk, trunk fallback, detached roots,
+// bottom-up graph lanes with ┘ joins. Stack: main ← feat-a ← {feat-b, feat-c}; orphan has no history.
+{
+  const { parseBranchTips, parseFirstParents, branchTree, formatBranchGraph, parseWorktrees } = require('../lib');
+  const tips = parseBranchTips('b1 feat-b\nc1 feat-c\na1 feat-a\nm1 main\no1 orphan\n'); // newest first
+  const fp = parseFirstParents('b1 a1\nc1 a1\na1 m1\nm1\no1\n');
+  branchTree({ tips, firstParents: fp, trunks: ['main'], birthOf: async () => 0 }).then((rows) => {
+    assert.deepStrictEqual(rows.map((r) => `${r.name}<${r.parent}`), ['orphan<', 'main<', 'feat-a<main', 'feat-b<feat-a', 'feat-c<feat-a']);
+    const g = formatBranchGraph([...rows].reverse(), 'main', ['main']);
+    assert.deepStrictEqual(g, ['◯   ', '│ ◯ ', '◯─┘ ', '◉   ', '◇   '], 'lanes: fork joins its parent with ┘, orphan is ◇');
+  }).then(() => {
+    // Same-tip tie: fresh child at its parent's commit → the OLDER branch is the parent.
+    const t2 = parseBranchTips('x1 child\nx1 parent\nm1 main\n');
+    const fp2 = parseFirstParents('x1 m1\nm1\n');
+    return branchTree({ tips: t2, firstParents: fp2, trunks: ['main'], birthOf: async (b) => ({ parent: 1, child: 2, main: 0 }[b]) });
+  }).then((rows) => {
+    assert.strictEqual(rows.find((r) => r.name === 'child').parent, 'parent', 'same tip: older branch is the parent');
+    assert.strictEqual(rows.find((r) => r.name === 'parent').parent, 'main');
+  }).catch((e) => { console.error(e); process.exit(1); });
+  const wt = parseWorktrees('worktree C:/core\nHEAD aa\nbranch refs/heads/x\n\nworktree C:/worktrees/US-1/core\nHEAD bb\nbranch refs/heads/y\n', 'C:\\core');
+  assert.deepStrictEqual([...wt], [['y', 'core']], 'other worktrees only, by folder name');
+}
+
 // globToRegex: ignore-pattern semantics — ** crosses slashes, * doesn't, /-containing anchors to path.
 {
   const m = (pat, rel) => { const re = globToRegex(pat); return !!re && re.test(rel); };
