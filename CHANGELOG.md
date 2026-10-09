@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.112 (unreleased)
+## 0.0.112
 
 - **Fix (VS Code):** `*` / `^` stage markers update right after View/Unview, Stage/Unstage and
   Revert. The self-index-write filter (which stops the refresh loop from Vetty's own `git diff`
