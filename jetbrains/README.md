@@ -1,7 +1,7 @@
 # Vetty for JetBrains (Rider)
 
 Local code-review tool — a native port of the [Vetty VS Code extension](../README.md).
-Pick a base branch; Vetty lists every changed file grouped Unviewed / Viewed / Untracked,
+Pick a base branch; Vetty lists every changed file grouped Unviewed / Viewed / Ignored,
 tracks what you've reviewed, shows only what's new since your last pass, and lets you leave
 inline comments you can export back to an AI agent.
 
@@ -18,7 +18,7 @@ Works in Rider and every other JetBrains IDE (depends only on the platform, not 
 - **Inline comments** — `Alt+Shift+C` (or right-click → Vetty: Add Comment) adds a gutter comment on the line/selection; click the gutter icon to edit/delete. Comments re-anchor by content when a file is rewritten. **Export Comments** copies all as `file:line — note`.
 - **Claude review order + notes** — a Claude session (the `vetty-review` skill) writes `<git-dir>/vetty/claude-review.json`; notes show as read-only gutter comments (bulb icon) and in the Comments pane, all shown only while the **Guided Review** toolbar toggle is on, which also orders the Review list with `#n` (one-line why in the tooltip). See the main README.
 - **TODO scanner** — new TODO/FIXME/etc. introduced vs the base, in their own pane, grouped by file. Only real markers count (after a comment leader, or as `TODO:`), not identifiers like `%TEMP%`.
-- **Track / Untrack** — push noise files (lockfiles, generated) into the Untracked section.
+- **Ignore / Include** — push noise files (lockfiles, generated) into the Ignored section.
 - **Auto-refresh** — the tree reloads on any file change, including out-of-editor agent edits; typing re-flags a viewed file unviewed instantly.
 
 Keys in the tool window: `j`/`k` next/prev unviewed (opens diff), `v` toggle viewed, double-click opens a

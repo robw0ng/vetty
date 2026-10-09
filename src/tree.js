@@ -273,6 +273,11 @@ class DiffTree {
     this.deleted = deleted;
     this.dirty = dirty; // working ≠ index — with `staged`, distinguishes committed (clean) rows
     this.wtOnly = wtOnly;
+    // Basenames that occur more than once: only those rows show their folder (the rest is noise the
+    // tooltip already carries).
+    const seen = new Map();
+    for (const f of files) seen.set(path.basename(f), (seen.get(path.basename(f)) || 0) + 1);
+    this.dupNames = new Set([...seen].filter(([, n]) => n > 1).map(([b]) => b));
     this.status = status;
     this.stat = stat;
     this.realChanged = realChanged;
@@ -435,7 +440,7 @@ class DiffTree {
       return [
         this._group(`Unviewed (${unv.length}) · vs ${shortRef(this.base)}`, unv, true, false, 'group-unviewed', `vs ${this.base}`),
         this._group(`Viewed (${vw.length})`, vw, true, false, 'group-viewed'),
-        this._group(`Untracked (${ig.length})`, ig, false, true, 'group-ignored'),
+        this._group(`Ignored (${ig.length})`, ig, false, true, 'group-ignored'),
       ];
     }
 
@@ -502,7 +507,7 @@ class DiffTree {
   _tooltip(rel, { isIgnored, viewed, snap, isClean, nComments, step }) {
     const KIND = { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', C: 'Copied', T: 'Type changed', U: 'New file' };
     const facts = [
-      isIgnored ? 'Untracked (review noise)' : viewed ? 'Viewed' : snap ? 'Unviewed — edited since you viewed it' : 'Unviewed',
+      isIgnored ? 'Ignored (review noise)' : viewed ? 'Viewed' : snap ? 'Unviewed — edited since you viewed it' : 'Unviewed',
       this.wtOnly?.has(rel) ? 'Uncommitted only — the working tree undoes a committed change (diff vs HEAD)' : '',
       this.staleStaged?.has(rel) ? 'Staged, but edited since — restage before commit'
         : this.staged?.has(rel) ? 'Staged'
@@ -537,7 +542,7 @@ class DiffTree {
     );
     const s = this.stat.get(rel);
     const counts = s ? `+${s.add} −${s.del}` : ''; // triage signal: how big is this change
-    const dirPart = this.nested || dir === '.' ? '' : dir; // dir shown by hierarchy when nested
+    const dirPart = this.nested || dir === '.' || !this.dupNames?.has(path.basename(rel)) ? '' : dir; // only to disambiguate
     const matchPart = hits ? `${hits.length} match${hits.length === 1 ? '' : 'es'}` : '';
     const group = getGroups(this.context, this.base)[rel];
     const groupPart = group ? `[${group}]` : '';
@@ -547,8 +552,8 @@ class DiffTree {
     // ↻ = viewed before, edited since — a re-review, not a first look (snapshot restorable).
     const viewedNow = isViewed(cwd, getViewed(this.context, this.base), rel);
     const rePart =
-      !viewedNow && !isIgnored && reviewedBlob(getViewed(this.context, this.base), rel) ? '↻ since view' : '';
-    const wtPart = this.wtOnly?.has(rel) ? 'uncommitted only' : '';
+      !viewedNow && !isIgnored && reviewedBlob(getViewed(this.context, this.base), rel) ? '↻' : ''; // edited since viewed (tooltip explains)
+    const wtPart = this.wtOnly?.has(rel) ? 'uncommitted' : ''; // not in the branch diff (tooltip explains)
     // Claude's review order: `#n` + its one-line why, while the sort toggle is on.
     const step = this.steps().get(rel);
     const stepPart = step ? `#${step.n}` : '';

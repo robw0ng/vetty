@@ -119,6 +119,8 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private var visibleTodos: List<Todo> = emptyList()  // the shown slice — Export TODOs copies these
     private var lastComments: List<VettyStateService.Comment> = emptyList()
     private val collapsedSections = HashSet<String>()   // Comments-pane sections the user collapsed
+    private var dupNames: Set<String> = emptySet()      // basenames listed more than once (rows show their folder)
+    private var mouseRow = -1                            // row under the cursor: file-row icons paint only there (+ selection)
     private var hoverRow = -1     // row + icon index currently under the cursor (for the hover highlight)
     private var hoverIcon = -1
     private var pressedPath: javax.swing.tree.TreePath? = null  // path under the cursor at mouse-press
@@ -196,17 +198,16 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         // One revert per row — the most likely one for its state; both live in the right-click menu.
         // Untracked rows revert too (delete-or-restore, same confirm). Committed (clean) rows get
         // no Revert Changes — nothing uncommitted to revert; snapshot restore stays real.
+        // Revert Changes is destructive — right-click only. Revert to Last Viewed stays: it's the re-review flow.
         if (vf.group == Group.UNVIEWED && svc.hasSnapshot(vf.rel))
             add(Triple(AllIcons.Vcs.History, "Revert to Last Viewed") { confirmRevertToViewed(listOf(vf)) })
-        else if (!vf.clean)
-            add(Triple(AllIcons.Actions.Rollback, "Revert Changes") { confirmRevert(listOf(vf)) })
         add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
         if (vf.group != Group.UNTRACKED) {
             val viewed = vf.group == Group.VIEWED
             val icon = if (viewed) AllIcons.Actions.Cancel else AllIcons.Actions.Checked
             add(Triple(icon, viewLabel(vf)) { offEdt(after = { select(vf.rel) }) { svc.toggleViewed(vf.rel) } })
         } else {
-            add(Triple(AllIcons.General.Add, "Track") { offEdt { svc.track(vf.rel) } })
+            add(Triple(AllIcons.General.Add, "Include") { offEdt { svc.track(vf.rel) } })
         }
     }
 
@@ -347,9 +348,14 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     init {
         val group = DefaultActionGroup().apply {
-            add(RefreshAction()); add(ChangeBaseAction()); add(RangeAction()); add(SinceReviewAction()); add(GuidedReviewAction()); add(WhitespaceAction()); add(StageOnViewAction()); add(IgnorePatternsAction())
-            addSeparator()
-            add(NestedToggleAction()); add(ExpandAllAction()); add(CollapseAllAction())
+            // Primary: what you change mid-review. Everything else sits behind ⋯ (like VS Code's view menu).
+            add(ChangeBaseAction()); add(RangeAction()); add(SinceReviewAction()); add(GuidedReviewAction())
+            add(DefaultActionGroup("More", true).apply {
+                templatePresentation.icon = AllIcons.Actions.More
+                add(RefreshAction()); add(WhitespaceAction()); add(StageOnViewAction()); add(IgnorePatternsAction())
+                addSeparator()
+                add(NestedToggleAction()); add(ExpandAllAction()); add(CollapseAllAction())
+            })
         }
         com.intellij.openapi.util.Disposer.register(project, diffPreview)
         svc.closeDiffPreview = { diffPreview.closeIfOpen() }   // file preview ↔ diff preview: one at a time
@@ -378,7 +384,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         tree.addMouseListener(object : MouseAdapter() {
             override fun mousePressed(e: MouseEvent) { pressedPath = tree.getPathForLocation(e.x, e.y); maybePopup(e) }
             override fun mouseReleased(e: MouseEvent) = maybePopup(e)
-            override fun mouseExited(e: MouseEvent) { if (hoverRow != -1) { hoverRow = -1; hoverIcon = -1; tree.repaint() } }
+            override fun mouseExited(e: MouseEvent) { if (hoverRow != -1 || mouseRow != -1) { hoverRow = -1; hoverIcon = -1; mouseRow = -1; tree.repaint() } }
             override fun mouseClicked(e: MouseEvent) {
                 if (e.isPopupTrigger || !SwingUtilities.isLeftMouseButton(e)) return
                 if (e.isControlDown || e.isShiftDown || e.isMetaDown) return  // multi-select gesture → don't open
@@ -433,7 +439,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                 tree.toolTipText = tip   // tooltip names the inline action (View / Unview)
                 tree.cursor = if (hr >= 0) java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
                               else java.awt.Cursor.getDefaultCursor()
-                if (hr != hoverRow || hi != hoverIcon) { hoverRow = hr; hoverIcon = hi; tree.repaint() }
+                if (hr != hoverRow || hi != hoverIcon || row != mouseRow) { hoverRow = hr; hoverIcon = hi; mouseRow = row; tree.repaint() }
             }
         })
         tree.addTreeExpansionListener(object : javax.swing.event.TreeExpansionListener {
@@ -663,7 +669,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         val group = DefaultActionGroup().apply {
             if (inUntracked) {
                 // Track / — / opens / — / Revert Changes
-                add(simpleAction("Track") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
+                add(simpleAction("Include") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
                 addSeparator()
                 add(openDiff); add(openFile)
                 addSeparator()
@@ -682,7 +688,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                 add(simpleAction("Revert to Last Viewed…") { confirmRevertToViewed(selectedFiles()) })
                 if (af?.clean != true) add(simpleAction("Revert Changes…") { confirmRevert(selectedFiles()) })
                 addSeparator()
-                add(simpleAction("Untrack") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
+                add(simpleAction("Ignore") { val sel = selectedFiles(); offEdt { sel.forEach { svc.untrack(it.rel) } } })
             }
         }
         com.intellij.openapi.ui.popup.JBPopupFactory.getInstance().createActionGroupPopup(
@@ -909,6 +915,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private fun rebuild(files: List<VFile>, todos: List<Todo>, comments: List<VettyStateService.Comment>) {
         lastTodos = todos; lastComments = comments
         allFiles = files
+        dupNames = files.groupingBy { it.rel.substringAfterLast('/') }.eachCount().filterValues { it > 1 }.keys
         // Claude's review order (toggle on): listed files first, in order — nav/advance follow it too.
         val shown = applyFilters(files).let { l ->
             if (svc.guidedReview()) l.sortedBy { svc.orderStep(it.rel)?.first ?: Int.MAX_VALUE } else l
@@ -1075,7 +1082,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     }
 
     private inner class IgnorePatternsAction :
-        UiAction("Ignore Patterns", "Globs sent to Untracked, one per line — a review-noise layer on top of .gitignore", AllIcons.General.Filter) {
+        UiAction("Ignore Patterns", "Globs sent to Ignored, one per line — a review-noise layer on top of .gitignore", AllIcons.General.Filter) {
         override fun actionPerformed(e: AnActionEvent) {
             val cur = svc.ignoreGlobs().joinToString("\n")
             val next = Messages.showMultilineInputDialog(
@@ -1206,7 +1213,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 
     /** Wraps the text renderer and prepends clickable inline icons on file rows AND comment rows. */
     private inner class VettyCellRenderer : javax.swing.tree.TreeCellRenderer {
-        private val text = VettyTextRenderer(svc) { rel -> searchMatches?.get(rel)?.size ?: 0 }
+        private val text = VettyTextRenderer(svc, { rel -> searchMatches?.get(rel)?.size ?: 0 }, { name -> name in dupNames })
         override fun getTreeCellRendererComponent(
             tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
             leaf: Boolean, row: Int, hasFocus: Boolean
@@ -1225,8 +1232,9 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             val h = comp.preferredSize.height.coerceAtLeast(18)
             return JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 0, 0)).apply {
                 isOpaque = false
+                val show = !hoverHere || selected || row == mouseRow   // file rows: icons only where the cursor / selection is
                 acts.forEachIndexed { i, (icon, tip, _) ->
-                    add(IconCell(icon, hoverHere && row == hoverRow && i == hoverIcon).apply {
+                    add(IconCell(if (show) icon else null, hoverHere && row == hoverRow && i == hoverIcon).apply {
                         toolTipText = tip
                         preferredSize = java.awt.Dimension(ROW_ICON, h)
                     })
@@ -1240,7 +1248,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
 private const val ROW_ICON = 22
 
 /** Icon label that paints Rider's rounded action-button hover background when hovered. */
-private class IconCell(icon: javax.swing.Icon, private val hovered: Boolean) : JBLabel(icon) {
+private class IconCell(icon: javax.swing.Icon?, private val hovered: Boolean) : JBLabel(icon) {
     init { isOpaque = false; horizontalAlignment = javax.swing.SwingConstants.CENTER }
     override fun paintComponent(g: java.awt.Graphics) {
         if (hovered) com.intellij.openapi.actionSystem.ex.ActionButtonLook.SYSTEM_LOOK.paintLookBackground(
@@ -1264,6 +1272,7 @@ private fun statusInfo(f: VFile): Pair<String, FileStatus> = when {
 private class VettyTextRenderer(
     private val svc: VettyService,
     private val matchCount: (String) -> Int,   // active-search hits for a file row ("N matches")
+    private val dupName: (String) -> Boolean,  // basename shared by several listed files → show its folder
 ) : ColoredTreeCellRenderer() {
     override fun customizeCellRenderer(
         tree: JTree, value: Any?, selected: Boolean, expanded: Boolean,
@@ -1274,7 +1283,7 @@ private class VettyTextRenderer(
         when (obj) {
             is GroupNode -> {
                 val label = when (obj.group) {
-                    Group.UNVIEWED -> "Unviewed"; Group.VIEWED -> "Viewed"; Group.UNTRACKED -> "Untracked"
+                    Group.UNVIEWED -> "Unviewed"; Group.VIEWED -> "Viewed"; Group.UNTRACKED -> "Ignored"
                 }
                 append("$label (${obj.count})", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
             }
@@ -1330,15 +1339,15 @@ private class VettyTextRenderer(
                     val mc = matchCount(obj.rel)
                     if (mc > 0) add("$mc match${if (mc == 1) "" else "es"}")
                     if (obj.add > 0 || obj.del > 0) add("+${obj.add} −${obj.del}")
-                    if (obj.wtOnly) add("uncommitted only")   // not in the branch diff — the working tree undoes a commit
-                    if (dir.isNotEmpty() && !svc.nested()) add(dir)   // folders show the path in tree mode
+                    if (obj.wtOnly) add("uncommitted")   // not in the branch diff (tooltip explains)
+                    if (dir.isNotEmpty() && !svc.nested() && dupName(name)) add(dir)   // only to disambiguate same-named files
                 }
                 if (extras.isNotEmpty()) append("   ${extras.joinToString("  ·  ")}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 val n = svc.commentsFor(obj.rel).size
                 if (n > 0) append("  💬$n", SimpleTextAttributes.GRAYED_ATTRIBUTES)
                 // ↻ = viewed before, edited since — a re-review, not a first look (snapshot restorable).
                 if (obj.group == Group.UNVIEWED && svc.hasSnapshot(obj.rel))
-                    append("  ↻ since view", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                    append("  ↻", SimpleTextAttributes.GRAYED_ATTRIBUTES)   // edited since viewed (tooltip explains)
             }
         }
     }

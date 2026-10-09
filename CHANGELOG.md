@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.0.106
+
+UI/UX declutter pass. Both editors unless noted.
+
+- **Rows**: the folder shows only when two listed files share a name; `↻ since view` → `↻`,
+  `uncommitted only` → `uncommitted` (tooltips explain both).
+- **Hover buttons**: Open File + View/Unview (+ Revert to Last Viewed on `↻` rows). Revert Changes,
+  Stage and Unstage are right-click only now; Open All in Group left the header too.
+- **Right-click menu** regrouped: review → groups → stage → revert → ignore.
+- **"Untracked" group is now "Ignored"**, with **Ignore / Include** actions — "untracked" clashed with
+  git's meaning (new files, which are reviewable).
+- **Title bar (VS Code)**: Refresh and Clear All Comments moved to ⋯; Compare uses history/diff
+  icons instead of the eye (that's View/Unview). ⋯ titles are imperative ("Turn Guided Review On",
+  "Show Uncommitted Only"), guided items grouped at the top. "Todos" view → "TODOs".
+- **Rider toolbar**: Base, Range, Compare, Guided Review stay; the rest sit behind ⋯. Row icons paint
+  only on the hovered/selected row (space reserved, so text doesn't jump).
+
 ## 0.0.105
 
 Guided review audit — feedback, reading, and a few fixes. Both editors unless noted.

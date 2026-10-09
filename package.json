@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.105",
+  "version": "0.0.106",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -142,12 +142,12 @@
       },
       {
         "command": "vetty.treeIgnore",
-        "title": "Untrack",
+        "title": "Ignore",
         "icon": "$(circle-slash)"
       },
       {
         "command": "vetty.treeUnignore",
-        "title": "Track",
+        "title": "Include",
         "icon": "$(check)"
       },
       {
@@ -174,51 +174,51 @@
       },
       {
         "command": "vetty.diffSinceCommit",
-        "title": "Range: Whole Branch (click for Uncommitted)",
+        "title": "Show Uncommitted Only",
         "category": "Vetty",
         "icon": "$(git-compare)"
       },
       {
         "command": "vetty.diffWholeBranch",
-        "title": "Range: Uncommitted (click for Whole Branch)",
+        "title": "Show Whole Branch",
         "category": "Vetty",
         "icon": "$(git-commit)"
       },
       {
         "command": "vetty.guidedNotesExpand",
-        "title": "Guided Notes: Collapsed (click to expand all)",
+        "title": "Expand Guided Notes",
         "category": "Vetty",
         "icon": "$(expand-all)"
       },
       {
         "command": "vetty.guidedNotesCollapse",
-        "title": "Guided Notes: Expanded (click to collapse — big picture stays open)",
+        "title": "Collapse Guided Notes (big picture stays open)",
         "category": "Vetty",
         "icon": "$(collapse-all)"
       },
       {
         "command": "vetty.guidedReviewOn",
-        "title": "Guided Review: Off (click for Claude's order + notes)",
+        "title": "Turn Guided Review On",
         "category": "Vetty",
         "icon": "$(list-unordered)"
       },
       {
         "command": "vetty.guidedReviewOff",
-        "title": "Guided Review: On (click for path order, no Claude notes)",
+        "title": "Turn Guided Review Off",
         "category": "Vetty",
         "icon": "$(list-ordered)"
       },
       {
         "command": "vetty.sinceReviewOn",
-        "title": "Compare: Base (click for Last Viewed)",
+        "title": "Compare with Last Viewed",
         "category": "Vetty",
-        "icon": "$(eye-closed)"
+        "icon": "$(history)"
       },
       {
         "command": "vetty.sinceReviewOff",
-        "title": "Compare: Last Viewed (click for Base)",
+        "title": "Compare with Base",
         "category": "Vetty",
-        "icon": "$(eye)"
+        "icon": "$(diff)"
       },
       {
         "command": "vetty.reviewPr",
@@ -482,7 +482,7 @@
         },
         {
           "id": "vettyTodos",
-          "name": "Todos"
+          "name": "TODOs"
         },
         {
           "id": "vettyComments",
@@ -524,7 +524,7 @@
         {
           "command": "vetty.clearComments",
           "when": "view == vettyComments",
-          "group": "navigation@2"
+          "group": "2_manage@0"
         },
         {
           "command": "vetty.reviewPr",
@@ -549,7 +549,7 @@
         {
           "command": "vetty.treeRefresh",
           "when": "view == vettyView",
-          "group": "navigation@3"
+          "group": "3_git@0"
         },
         {
           "command": "vetty.diffSinceCommit",
@@ -574,22 +574,22 @@
         {
           "command": "vetty.guidedReviewOn",
           "when": "view == vettyView && !vetty.guidedReview",
-          "group": "2_view@0"
+          "group": "1_guided@0"
         },
         {
           "command": "vetty.guidedReviewOff",
           "when": "view == vettyView && vetty.guidedReview",
-          "group": "2_view@0"
+          "group": "1_guided@0"
         },
         {
           "command": "vetty.guidedNotesExpand",
           "when": "view == vettyView && vetty.guidedReview && !vetty.guidedNotesExpanded",
-          "group": "2_view@0"
+          "group": "1_guided@1"
         },
         {
           "command": "vetty.guidedNotesCollapse",
           "when": "view == vettyView && vetty.guidedReview && vetty.guidedNotesExpanded",
-          "group": "2_view@0"
+          "group": "1_guided@1"
         },
         {
           "command": "vetty.viewAsTree",
@@ -646,7 +646,7 @@
         {
           "command": "vetty.treeOpenGroup",
           "when": "view == vettyView && viewItem =~ /^group-/",
-          "group": "inline@0"
+          "group": "1_group@0"
         },
         {
           "command": "vetty.treeMarkAllViewed",
@@ -694,11 +694,6 @@
           "group": "inline@3"
         },
         {
-          "command": "vetty.stageFile",
-          "when": "view == vettyView && viewItem =~ /^file-viewed/ && !config.vetty.stageOnView && !(viewItem =~ /-(staged|clean)$/)",
-          "group": "inline@4"
-        },
-        {
           "command": "vetty.treeView",
           "when": "view == vettyView && viewItem =~ /^file-unviewed/ && (!config.vetty.stageOnView || viewItem =~ /-(staged|clean)$/)",
           "group": "1_review@1"
@@ -731,7 +726,7 @@
         {
           "command": "vetty.treeIgnore",
           "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
-          "group": "4_track@1"
+          "group": "5_track@1"
         },
         {
           "command": "vetty.treeUnignore",
@@ -741,7 +736,7 @@
         {
           "command": "vetty.stageFile",
           "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/ && !(viewItem =~ /-(staged|clean)$/)",
-          "group": "3_revert@0"
+          "group": "3_stage@0"
         },
         {
           "command": "vetty.addToGroup",
@@ -815,18 +810,13 @@
         },
         {
           "command": "vetty.revertFile",
-          "when": "view == vettyView && viewItem =~ /^file-viewed/ && !(viewItem =~ /-clean$/)",
-          "group": "inline@1"
-        },
-        {
-          "command": "vetty.revertFile",
           "when": "view == vettyView && viewItem =~ /^file-/ && !(viewItem =~ /-clean$/)",
-          "group": "3_revert@2"
+          "group": "4_revert@1"
         },
         {
           "command": "vetty.revertToViewed",
           "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/",
-          "group": "3_revert@1"
+          "group": "4_revert@0"
         },
         {
           "command": "vetty.revertToViewed",
@@ -834,24 +824,9 @@
           "group": "inline@1"
         },
         {
-          "command": "vetty.revertFile",
-          "when": "view == vettyView && viewItem =~ /^file-unviewed(-staged)?$/",
-          "group": "inline@1"
-        },
-        {
           "command": "vetty.unstageFile",
           "when": "view == vettyView && viewItem =~ /^file-(viewed|unviewed)/ && viewItem =~ /-staged$/",
-          "group": "3_revert@0"
-        },
-        {
-          "command": "vetty.unstageFile",
-          "when": "view == vettyView && viewItem =~ /^file-viewed/ && !config.vetty.stageOnView && viewItem =~ /-staged$/",
-          "group": "inline@4"
-        },
-        {
-          "command": "vetty.revertFile",
-          "when": "view == vettyView && viewItem == file-ignored",
-          "group": "inline@1"
+          "group": "3_stage@1"
         }
       ],
       "comments/commentThread/context": [
@@ -1133,7 +1108,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Glob patterns whose matches go to the Untracked group — a review-noise layer on top of .gitignore (e.g. \"*.g.cs\", \"**/migrations/**\", \"package-lock.json\"). `**` crosses folders; a pattern containing `/` matches the repo-relative path, otherwise any path segment."
+          "description": "Glob patterns whose matches go to the Ignored group — a review-noise layer on top of .gitignore (e.g. \"*.g.cs\", \"**/migrations/**\", \"package-lock.json\"). `**` crosses folders; a pattern containing `/` matches the repo-relative path, otherwise any path segment."
         }
       }
     }
