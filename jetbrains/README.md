@@ -39,7 +39,8 @@ gradle wrapper            # one-time: generates gradlew + the wrapper jar (skip 
 ```
 
 Install the built zip via **Settings ▸ Plugins ▸ ⚙ ▸ Install Plugin from Disk**, or unzip it into
-`%APPDATA%\JetBrains\Rider<version>\plugins\` and restart.
+Rider's plugins folder (`%APPDATA%\JetBrains\Rider<version>\plugins\` on Windows,
+`~/Library/Application Support/JetBrains/Rider<version>/plugins/` on macOS) and restart. See [INSTALL.md](../INSTALL.md).
 
 Built & verified against **Rider 2025.2 (RD-252)** with Gradle 8.10.2 and Kotlin 2.2.0. The
 platform is compiled with Kotlin metadata 2.2 — the build Kotlin version must match (2.2.x).
