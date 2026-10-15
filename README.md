@@ -78,8 +78,9 @@ Deleting a note removes it from the file; **Vetty: Clear Guided Review** (comman
 the whole guided review. Notes are context, not change requests: they never block
 stage-on-view and aren't exported.
 
-The Claude side is the `vetty-review` skill in [`skills/vetty-review`](skills/vetty-review/SKILL.md).
-Install it once for every session: copy that folder to `~/.claude/skills/`.
+The Claude side is the `vetty-review` skill in [`plugins/vetty/skills/vetty-review`](plugins/vetty/skills/vetty-review/SKILL.md),
+shipped as the Claude plugin `vetty` — see [INSTALL.md](INSTALL.md) (`claude plugin marketplace add <clone>`,
+`claude plugin install vetty@robert-vetty`). In a session it's `/vetty:vetty-review`.
 
 ## Pull request review (optional)
 

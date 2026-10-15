@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "robert-vetty",
+  "description": "Vetty: local code review for VS Code and Rider, plus the Claude skill that writes its guided reviews.",
+  "owner": { "name": "Robert Wong" },
+  "plugins": [
+    {
+      "name": "vetty",
+      "description": "vetty-review: annotate a branch for Vetty's Guided Review (file order + inline context notes).",
+      "source": "./plugins/vetty",
+      "category": "productivity"
+    }
+  ]
+}

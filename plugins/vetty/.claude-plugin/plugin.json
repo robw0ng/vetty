@@ -1,0 +1,8 @@
+{
+  "name": "vetty",
+  "version": "0.0.112",
+  "description": "vetty-review: annotate a branch for Vetty's Guided Review (file order + inline context notes).",
+  "author": {
+    "name": "Robert Wong"
+  }
+}

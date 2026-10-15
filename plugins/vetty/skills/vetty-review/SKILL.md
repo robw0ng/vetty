@@ -25,6 +25,11 @@ scope**: order and comment ONLY those paths, exactly as spelled. Vetty's base is
 branch (not main), and it also counts uncommitted + untracked files — a guessed diff won't match.
 Vetty ignores entries outside `files`.
 
+**Check `base` first.** It must be the branch this one was cut from. If it shows a trunk (`develop`,
+`main`) while the branch is stacked on something else, stop and ask the user to set Vetty's base to
+`<parent>` (Change Base Branch in Vetty), then re-read `scope.json`. A review against the wrong base
+describes the wrong diff.
+
 ### Mode: whole branch or since the last commit
 
 `range` is the mode the user has Vetty in (its **Range** toggle). Annotate that mode:
@@ -39,6 +44,8 @@ Vetty ignores entries outside `files`.
 - The user asks for the other mode than Vetty is in? Tell them to flip Vetty's **Range** toggle (that rewrites
   `scope.json`), then re-read it. Don't annotate a scope Vetty isn't showing.
 - Say which mode you annotated in your final message.
+- Rule of thumb: `branch` for a first review of the work, `commit` for a fix round after feedback.
+- Re-run after any rebase or amend: lines and `head` move, and Vetty shows the review as stale.
 
 No `scope.json` (Vetty not open on this repo yet)? Ask the user to open Vetty once, or fall back to
 `git diff --name-status $(git merge-base HEAD <base>)` + `git ls-files --others --exclude-standard`.
@@ -144,6 +151,27 @@ Example:
 
 Deleted files (`status` `D`) can't take a line note — their `order` note carries the big picture.
 
+### Follow-up notes (where the big picture points)
+
+A big-picture note names things — a **Flow:** step, a **Calls:** target, a rule or decision. Wherever
+one of them happens in *this* file, put a short inline note at that line, so the reader who just read
+the summary finds each piece where it lives.
+
+- **One per thing named** that has a line in this file: each flow step, each call, each rule the
+  big picture mentions. Things in other files are already reachable by name — no note for them here.
+- **1–2 bullets, ≤ 15 words each.** Name which part of the big picture this is, then add the one
+  fact the summary left out (why, edge case, what it guards).
+- **Reuse the big picture's words** so the link is obvious: `- **Flow step 3:** owner check.`
+- **Merge with the block note** when the step is the block's first line — one note, not two.
+- Skip it when the line is self-explanatory and the summary already said everything.
+
+Example — big picture says `**Flow:** validate → load attachment → owner check → create → save.`:
+
+```
+- **Owner check:** only the work order's own company adds a response.
+- **Why:** the design's "Only the assigned user can add a reply" (12:345).
+```
+
 ### Block notes (every non-trivial block)
 
 The reader reads every changed line anyway, so give context at each logical block — they should
@@ -164,26 +192,22 @@ On top of the block note, go deeper where it's earned: new concepts, non-obvious
 machines, cross-file contracts, subtle edge cases, risky spots, precedent departures. These can run
 longer (up to 4 bullets or a table). Fold the detail into the block note when the block is small.
 
-### Style (all notes)
-
-- Bullets and short sentences. 1–4 bullets per note.
-- Explain **why** / **what it connects to** — not a restatement of the code.
-- Name the other file/function when a note depends on it: `→ called from login.ts handleSubmit`.
-- A **table** when there's a state matrix, mode × input, or before/after behavior.
-- No filler ("This function…", "Note that…"), no praise, no change requests.
-
-### Make it easy to digest
+### Style — short, concrete, easy to digest (all notes)
 
 A reader skims notes while reading code. Each note must land in about five seconds.
 
 - **Lead with the point.** First bullet = the one thing to know, ≤ 12 words.
-- **One idea per bullet**, ≤ ~15 words. A `;`, a second clause, or a parenthetical = split into two bullets.
+- **One idea per bullet**, ≤ ~15 words, 1–4 bullets per note. A `;`, a second clause, or a
+  parenthetical = split into two bullets.
+- **Why and what it connects to**, not a restatement of the code. Name the other file/function when
+  a note depends on it: `→ called from login.ts handleSubmit`.
 - **Label bullets when it helps scanning**: `**Why:**`, `**Calls:**`, `**Called by:**`, `**Edge:**`, `**Open:**`.
-- **Plain words.** Spell out abbreviations once per note (work order (WO)), or avoid them.
+- **Plain, concrete words.** Spell out abbreviations once per note (work order (WO)) or avoid them;
+  "rejects a template republished mid-dialog", not "handles version staleness".
 - **Backticks only for names the reader will search for** — not for every noun.
-- **Concrete over abstract**: "rejects a template republished mid-dialog", not "handles version staleness".
-- **Tables**: short cells (≤ 4 words), 2–4 columns, only when rows really compare.
-- Blank line between a bullet list and a table.
+- **Tables** for a state matrix, mode × input, or before/after behaviour: short cells (≤ 4 words),
+  2–4 columns, a blank line before the table.
+- No filler ("This function…", "Note that…"), no praise, no change requests.
 
 Before (hard to digest):
 
@@ -206,6 +230,11 @@ thread, PR discussion, your own earlier session). Always say **where it's from**
 find it: `(Q2 — TICKET-1 planning questions)`, `(decided in PR #12 review)`, `(per ticket TICKET-1)`.
 Mark open items as open: `Open: Q3 (TICKET-1 planning) — count child orders in the close dialog?`
 
+**Figma nodes are always links, never a bare id.** Wrap the node id in a markdown link to the node:
+`[12:345](https://www.figma.com/design/<fileKey>/<fileName>?node-id=12-345)`, with the id's `:` written as `-`
+in the URL. Take the file key and name from the board URL the plan or ticket gives; if no board URL is known, ask
+for it rather than citing a bare id.
+
 Good:
 
 ```
@@ -218,7 +247,8 @@ Bad: `This function sets up a listener that listens for file changes and then ca
 ## 5. Finish
 
 Check before writing: every non-deleted file in `scope.json` has a big-picture note, every
-non-trivial changed block has a block note, no note just restates its code, every `order` entry and
+non-trivial changed block has a block note, everything a big-picture note names that lives in the
+same file has a follow-up note at its line, no note just restates its code, every `order` entry and
 note path is in `scope.json`, and each new pattern names its precedent (or says none).
 
 Tell the user in one or two lines: the mode (whole branch / since last commit), how many files were ordered, how many notes you wrote, and that

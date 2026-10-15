@@ -12,4 +12,6 @@ release.bat
 node_modules/**
 jetbrains/**
 ROADMAP.md
-skills/**
+plugins/**
+.claude-plugin/**
+INSTALL.md
