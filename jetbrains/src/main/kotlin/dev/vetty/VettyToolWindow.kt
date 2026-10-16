@@ -158,9 +158,6 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         ApplicationManager.getApplication().executeOnPooledThread { work(); reload(after) }
     }
 
-    /** Inline row buttons: view/unview (check=View, X=Unview) or Track for noise rows, + Open File,
-     *  + state-dependent revert: viewed rows get full Revert (to HEAD), unviewed rows with a
-     *  last-viewed snapshot get Revert to Last Viewed. (Untrack lives only in the right-click menu.) */
     /** "View" / "Unview", suffixed with the staging side effect ONLY when the click will actually
      *  change the index: View & Stage needs stage-on-view + not already staged; Unview & Unstage
      *  needs stage-on-view + currently staged. */
@@ -172,12 +169,10 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             if (svc.stageOnView() && !staged && vf?.clean != true) "View & Stage" else "View"
     }
 
+    /** Inline row buttons, left to right: Revert to Last Viewed (unviewed rows with a snapshot — the
+     *  re-review flow), Open File, then View/Unview, or Include on ignored rows. Revert Changes is
+     *  destructive, so it lives only in the right-click menu. */
     private fun fileActions(vf: VFile): List<Triple<javax.swing.Icon, String, () -> Unit>> = buildList {
-        // Order: revert → open → view/unview (revert first, primary review action last).
-        // One revert per row — the most likely one for its state; both live in the right-click menu.
-        // Untracked rows revert too (delete-or-restore, same confirm). Committed (clean) rows get
-        // no Revert Changes — nothing uncommitted to revert; snapshot restore stays real.
-        // Revert Changes is destructive — right-click only. Revert to Last Viewed stays: it's the re-review flow.
         if (vf.group == Group.UNVIEWED && svc.hasSnapshot(vf.rel))
             add(Triple(AllIcons.Vcs.History, "Revert to Last Viewed") { confirmRevertToViewed(listOf(vf)) })
         add(Triple(AllIcons.Actions.MenuOpen, "Open File") { svc.openFile(vf.rel) })
@@ -559,7 +554,6 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             }, BorderLayout.NORTH)
             add(commentScroll, BorderLayout.CENTER)
         }
-        // TODOs section header toolbar: Export (copy all shown as bullets).
         val todoTools = ActionManager.getInstance().createActionToolbar(
             "VettyTodos", DefaultActionGroup().apply { add(ExportTodosAction()) }, true)
         todoTools.targetComponent = this
@@ -647,14 +641,12 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         val openFile = simpleAction("Open File") { selectedFiles().forEach { svc.openFile(it.rel) } }
         val group = DefaultActionGroup().apply {
             if (inUntracked) {
-                // Track / — / opens / — / Revert Changes
                 add(simpleAction("Include") { val sel = selectedFiles(); offEdt { sel.forEach { svc.track(it.rel) } } })
                 addSeparator()
                 add(openDiff); add(openFile)
                 addSeparator()
                 add(simpleAction("Revert Changes…") { confirmRevert(selectedFiles()) })
             } else {
-                // View/Unview + opens / — / Stage↔Unstage + reverts / — / Untrack
                 add(simpleAction(viewLabel(activeFile())) { toggleViewedSelected() })
                 add(openDiff); add(openFile)
                 addSeparator()

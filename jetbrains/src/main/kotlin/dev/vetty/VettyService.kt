@@ -318,10 +318,8 @@ class VettyService(internal val project: Project, internal val cs: CoroutineScop
     /** The last file/diff opened by a single-click, so the next click can replace it (preview-tab feel). */
     internal var lastPreview: VirtualFile? = null
 
-    // Added/untracked files preview as a plain file tab (above); modified files preview in the diff
-    // preview tab (VettyDiffPreview). Those are two separate surfaces, so switching between an added
-    // and a modified file left BOTH open. The tool window wires this to close the diff preview when a
-    // file preview opens; openFilePreview→file and diffPreview→file close each other for one preview.
+    // File previews and the diff preview (VettyDiffPreview) are two tab surfaces, so switching between
+    // an added and a modified file left both open. The tool window wires this so each closes the other.
     var closeDiffPreview: (() -> Unit)? = null
 
     // --- TODO scanner -----------------------------------------------------------------------

@@ -59,9 +59,9 @@ fun VettyService.claudeReview(): VettyReviewFile.ClaudeReview? = synchronized(th
     return claudeVal
 }
 
-/** Claude context notes — read-only context, NOT change requests (never gate stage-on-view). */
-// Guided Review off → hidden. Only notes on files in this review: a note on a file Vetty doesn't
-// list has no row to belong to (Claude annotated outside the scope).
+/** Claude context notes — read-only context, NOT change requests (never gate stage-on-view). Hidden
+ *  while Guided Review is off, and only on files in this review: a note on a file Vetty doesn't list
+ *  has no row to belong to. */
 fun VettyService.aiComments(): List<VettyStateService.Comment> =
     if (!state.guidedReview) emptyList() else claudeReview()?.comments?.filter { it.file in reviewRels } ?: emptyList()
 fun VettyService.aiCommentsFor(rel: String) = aiComments().filter { it.file == rel }
