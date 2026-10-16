@@ -1,12 +1,15 @@
-// Base-branch picker: the terminal picker's branch tree in a webview (QuickPick renders in a proportional
+// Base-branch pickers. pickBranchTree: the terminal picker's branch tree in a webview (QuickPick renders in a proportional
 // font and can't draw lanes). Trunk at the foot, stacks grow upward, every branch above its parent;
 // ◉ you are here, cyan BASE on the inferred parent, ⌂ for branches checked out in other worktrees.
-// Type to filter, ↑↓ Enter Esc, click to pick. Resolves to the picked branch or null.
+// Type to filter, ↑↓ Enter Esc, click to pick. pickBranchList: the flat QuickPick fallback for odd
+// repos (unborn HEAD, no reflog). Both resolve to the picked branch or null.
 const vscode = require('vscode');
 const crypto = require('crypto');
 const { layoutBranchGraph } = require('../lib');
-const core = require('./core');
-const { currentBranch, branchTreeData, defaultBase, lastBranch, TRUNK_NAMES } = core;
+const {
+  currentBranch, localBranches, branchTreeData, defaultBase, lastBranch, aheadBehind, branchCreatedAt,
+  TRUNK_NAMES, MAX_REL_BRANCHES, PARENT_MAX_AHEAD,
+} = require('./core');
 
 let panel = null; // one picker at a time
 
@@ -196,4 +199,71 @@ function html(items, selected) {
 </script></body></html>`;
 }
 
-module.exports = { pickBranchTree };
+/** Fallback picker — local branches, labeled by their relationship to the current branch (parent /
+ *  ancestor / descendant / diverged), with the inferred direct parent surfaced first. */
+async function pickBranchList(context, cwd) {
+  const last = lastBranch(context);
+  const itemsPromise = (async () => {
+    const cur = await currentBranch(cwd);
+    const others = (await localBranches(cwd)).filter((n) => n !== cur);
+    const rels = new Map();
+    await Promise.all(others.slice(0, MAX_REL_BRANCHES).map(async (b) => rels.set(b, await aheadBehind(cwd, b))));
+    // A branch at the SAME tip is either this branch's parent (created earlier — fresh stacked
+    // branch with no commits yet) or a fresh child (created later). Reflog breaks the tie.
+    const curBorn = [...rels.values()].some((ab) => ab && ab.ahead === 0 && ab.behind === 0)
+      ? await branchCreatedAt(cwd, cur)
+      : null;
+
+    const items = [];
+    for (const b of others) {
+      const ab = rels.get(b);
+      let description = '';
+      let rank = 5; // sort bucket: parent(0) ancestor(1) same(2) diverged(3) descendant(4) unknown(5)
+      let ahead = Infinity;
+      if (ab) {
+        ahead = ab.ahead;
+        if (ab.behind === 0 && ab.ahead === 0) {
+          const older = curBorn !== null && (await branchCreatedAt(cwd, b)) < curBorn;
+          if (older) (description = 'parent · same commit'), (rank = 0), (ahead = 0);
+          else (description = 'same commit'), (rank = 4);
+        }
+        else if (ab.behind === 0 && ab.ahead > 0) (description = `ancestor · ${ab.ahead} ahead`), (rank = 1);
+        else if (ab.ahead === 0 && ab.behind > 0) (description = `descendant · ${ab.behind} behind`), (rank = 4);
+        else if (ab.ahead > 0 && ab.behind > 0) (description = `↑${ab.ahead} ↓${ab.behind}`), (rank = 3);
+        else (description = 'up to date'), (rank = 2);
+      }
+      items.push({ label: b, description, branch: b, rank, ahead });
+    }
+
+    // Direct parent = the closest ancestor, but only if it's reasonably near (else it's just an old
+    // merged branch the current branch contains — not a base). A same-commit parent (rank 0 above)
+    // is closer than any strict ancestor, so it wins and no promotion happens.
+    if (!items.some((i) => i.rank === 0)) {
+      const parent = items.filter((i) => i.rank === 1).sort((a, b) => a.ahead - b.ahead)[0];
+      if (parent && parent.ahead <= PARENT_MAX_AHEAD) {
+        parent.description = `parent · ${parent.ahead} ahead`;
+        parent.rank = 0;
+      }
+    }
+    // Sort by bucket; within ancestors/parent, nearest first (fewest commits ahead) = stack order.
+    items.sort((a, b) => a.rank - b.rank || a.ahead - b.ahead);
+    // Always offer the current branch (= uncommitted working changes) so single-branch repos / being
+    // on the base branch still have something to pick.
+    if (cur) items.push({ label: cur, description: 'current · working changes', branch: cur, rank: 99, ahead: Infinity });
+    if (last) {
+      const i = items.findIndex((x) => x.branch === last);
+      if (i > 0) items.unshift(items.splice(i, 1)[0]); // last-used to the very top
+    }
+    return items;
+  })().catch((e) => {
+    vscode.window.showErrorMessage(`Could not list branches: ${e.message}`);
+    return [];
+  });
+
+  const pick = await vscode.window.showQuickPick(itemsPromise, {
+    placeHolder: 'Diff against which local branch?',
+  });
+  return pick ? pick.branch : null;
+}
+
+module.exports = { pickBranchTree, pickBranchList };

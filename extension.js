@@ -15,6 +15,8 @@ const comments = require('./src/comments');
 const commentsView = require('./src/comments-view');
 const pr = require('./src/pr');
 const cmds = require('./src/commands');
+const stage = require('./src/stage');
+const groups = require('./src/groups');
 
 /** @param {vscode.ExtensionContext} context */
 function activate(context) {
@@ -87,23 +89,23 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.prevUnviewed', () => nav.navigateUnviewed(context, -1)),
     vscode.commands.registerCommand('vetty.viewCurrent', () => cmds.applyViewed(context)),
     vscode.commands.registerCommand('vetty.togglePrMode', () => pr.togglePrMode()),
-    vscode.commands.registerCommand('vetty.stageViewed', () => cmds.stageViewed(context)),
-    vscode.commands.registerCommand('vetty.stageFile', (item, sel) => cmds.stageFiles(context, item, sel)),
-    vscode.commands.registerCommand('vetty.unstageFile', (item, sel) => cmds.unstageFiles(context, item, sel)),
-    vscode.commands.registerCommand('vetty.addToGroup', (item, sel) => cmds.addToGroup(context, item, sel)),
-    vscode.commands.registerCommand('vetty.removeFromGroup', (item, sel) => cmds.removeFromGroup(context, item, sel)),
-    vscode.commands.registerCommand('vetty.stageGroup', () => cmds.stageGroup(context)),
-    vscode.commands.registerCommand('vetty.markGroupViewed', () => cmds.markGroupViewed(context)),
-    vscode.commands.registerCommand('vetty.openGroup', () => cmds.openGroup(context)),
-    vscode.commands.registerCommand('vetty.ungroup', () => cmds.ungroup(context)),
-    vscode.commands.registerCommand('vetty.clearGroups', () => cmds.clearGroups(context)),
+    vscode.commands.registerCommand('vetty.stageViewed', () => stage.stageViewed(context)),
+    vscode.commands.registerCommand('vetty.stageFile', (item, sel) => stage.stageFiles(context, item, sel)),
+    vscode.commands.registerCommand('vetty.unstageFile', (item, sel) => stage.unstageFiles(context, item, sel)),
+    vscode.commands.registerCommand('vetty.addToGroup', (item, sel) => groups.addToGroup(context, item, sel)),
+    vscode.commands.registerCommand('vetty.removeFromGroup', (item, sel) => groups.removeFromGroup(context, item, sel)),
+    vscode.commands.registerCommand('vetty.stageGroup', () => groups.stageGroup(context)),
+    vscode.commands.registerCommand('vetty.markGroupViewed', () => groups.markGroupViewed(context)),
+    vscode.commands.registerCommand('vetty.openGroup', () => groups.openGroup(context)),
+    vscode.commands.registerCommand('vetty.ungroup', () => groups.ungroup(context)),
+    vscode.commands.registerCommand('vetty.clearGroups', () => groups.clearGroups(context)),
     vscode.commands.registerCommand('vetty.collapseAll', () => nav.collapseFolders()),
     vscode.commands.registerCommand('vetty.expandAll', () => nav.expandAll()),
     vscode.commands.registerCommand('vetty.hideWhitespace', () => nav.toggleWhitespace(context)),
     vscode.commands.registerCommand('vetty.showWhitespace', () => nav.toggleWhitespace(context)),
-    vscode.commands.registerCommand('vetty.revertFile', (item, sel) => cmds.revertFiles(context, item, sel)),
-    vscode.commands.registerCommand('vetty.revertToViewed', (item, sel) => cmds.revertToViewed(context, item, sel)),
-    vscode.commands.registerCommand('vetty.toggleStageOnView', () => cmds.toggleStageOnView()),
+    vscode.commands.registerCommand('vetty.revertFile', (item, sel) => stage.revertFiles(context, item, sel)),
+    vscode.commands.registerCommand('vetty.revertToViewed', (item, sel) => stage.revertToViewed(context, item, sel)),
+    vscode.commands.registerCommand('vetty.toggleStageOnView', () => stage.toggleStageOnView()),
     vscode.commands.registerCommand('vetty.showDebugLog', () => core.showDebugLog()),
     vscode.workspace.onDidChangeConfiguration(async (e) => {
       if (e.affectsConfiguration('vetty.debug')) core.updateDebugFlag();
@@ -116,7 +118,7 @@ function activate(context) {
       // Disabling mid-review → clean up the checkout so the user isn't stranded on the PR branch.
       if (!core.prEnabled() && context.workspaceState.get(core.REVIEW_KEY)) await pr.finishReview(context);
     }),
-    vscode.commands.registerCommand('vetty.treeOpenGroup', (item) => cmds.treeOpenGroup(item)),
+    vscode.commands.registerCommand('vetty.treeOpenGroup', (item) => groups.treeOpenGroup(item)),
     vscode.commands.registerCommand('vetty.treeMarkAllViewed', (item) => cmds.treeMarkAllViewed(context, item)),
     vscode.commands.registerCommand('vetty.treeMarkAllUnviewed', (item) => cmds.treeMarkAllUnviewed(context, item)),
     vscode.window.onDidChangeActiveTextEditor(() => core.updateViewedContext(context)),

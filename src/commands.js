@@ -1,17 +1,17 @@
-// Command handlers: pickers, bulk open flows, viewed/ignored/group mutations, staging, and the
-// tree-row actions. Thin glue over core (state) and tree (open behaviors).
+// Command handlers: folder/branch pickers, bulk open flows, viewed/ignored mutations, and the
+// tree-row actions. Thin glue over core (state) and review-nav (open behaviors).
 const vscode = require('vscode');
 const path = require('path');
 const core = require('./core');
 const {
-  app, refreshTree, getCwd, git, gitAddChunked, stageOnView, unstageOnUnview, mergeBaseRef, untrackedFiles,
+  app, refreshTree, getCwd, git, stageOnView, unstageOnUnview, mergeBaseRef, untrackedFiles,
   getViewed, setViewed, isViewed, viewedEntry, viewedEntries, getIgnored, setIgnored,
-  getGroups, setGroups, groupNames, activeRelPath, updateViewedContext,
-  currentBranch, localBranches, aheadBehind, setBaseFor, lastBranch,
-  MAX_REL_BRANCHES, PARENT_MAX_AHEAD, MAX_OPEN_WITHOUT_CONFIRM, FOLDER_KEY,
-  workspaceFolderPath, resolveRepoRoot, watchGitDir, detectGh, hashCache, baseUriFor,
+  activeRelPath, updateViewedContext, currentBranch, setBaseFor, lastBranch,
+  MAX_OPEN_WITHOUT_CONFIRM, FOLDER_KEY, workspaceFolderPath, resolveRepoRoot, watchGitDir, detectGh, hashCache, baseUriFor,
 } = core;
-const { openOneDiff, openReviewFile, atFirstComment } = require('./review-nav');
+const { openOneDiff, atFirstComment } = require('./review-nav');
+const { pickBranchTree, pickBranchList } = require('./branchpick');
+
 
 /** Multi-root: pick which workspace folder Vetty reviews. Remembered per workspace. */
 async function pickFolder(context) {
@@ -41,12 +41,12 @@ async function pickFolder(context) {
   await app.diffTree.load();
 }
 
-/** Branch picker: the terminal-picker-style tree webview (src/branchpick.js). The flat QuickPick below
- *  stays as the fallback if the tree can't be built (odd repos: unborn HEAD, no reflog). */
+/** Branch picker: the terminal-picker-style tree webview, with the flat QuickPick as the fallback if
+ *  the tree can't be built (odd repos: unborn HEAD, no reflog). Both live in src/branchpick.js. */
 async function pickBranch(context, cwd) {
   let base;
   try {
-    base = await require('./branchpick').pickBranchTree(context, cwd);
+    base = await pickBranchTree(context, cwd);
   } catch (e) {
     core.dbg(`tree picker failed, falling back to the list: ${e.message}`);
     base = await pickBranchList(context, cwd);
@@ -55,73 +55,6 @@ async function pickBranch(context, cwd) {
   await setBaseFor(context, await currentBranch(cwd), base); // remember per current branch
   updateViewedContext(context);
   return base;
-}
-
-/** Fallback picker — local branches, labeled by their relationship to the current branch (parent /
- *  ancestor / descendant / diverged), with the inferred direct parent surfaced first. */
-async function pickBranchList(context, cwd) {
-  const last = lastBranch(context);
-  const itemsPromise = (async () => {
-    const cur = await currentBranch(cwd);
-    const others = (await localBranches(cwd)).filter((n) => n !== cur);
-    const rels = new Map();
-    await Promise.all(others.slice(0, MAX_REL_BRANCHES).map(async (b) => rels.set(b, await aheadBehind(cwd, b))));
-    // A branch at the SAME tip is either this branch's parent (created earlier — fresh stacked
-    // branch with no commits yet) or a fresh child (created later). Reflog breaks the tie.
-    const curBorn = [...rels.values()].some((ab) => ab && ab.ahead === 0 && ab.behind === 0)
-      ? await core.branchCreatedAt(cwd, cur)
-      : null;
-
-    const items = [];
-    for (const b of others) {
-      const ab = rels.get(b);
-      let description = '';
-      let rank = 5; // sort bucket: parent(0) ancestor(1) same(2) diverged(3) descendant(4) unknown(5)
-      let ahead = Infinity;
-      if (ab) {
-        ahead = ab.ahead;
-        if (ab.behind === 0 && ab.ahead === 0) {
-          const older = curBorn !== null && (await core.branchCreatedAt(cwd, b)) < curBorn;
-          if (older) (description = 'parent · same commit'), (rank = 0), (ahead = 0);
-          else (description = 'same commit'), (rank = 4);
-        }
-        else if (ab.behind === 0 && ab.ahead > 0) (description = `ancestor · ${ab.ahead} ahead`), (rank = 1);
-        else if (ab.ahead === 0 && ab.behind > 0) (description = `descendant · ${ab.behind} behind`), (rank = 4);
-        else if (ab.ahead > 0 && ab.behind > 0) (description = `↑${ab.ahead} ↓${ab.behind}`), (rank = 3);
-        else (description = 'up to date'), (rank = 2);
-      }
-      items.push({ label: b, description, branch: b, rank, ahead });
-    }
-
-    // Direct parent = the closest ancestor, but only if it's reasonably near (else it's just an old
-    // merged branch the current branch contains — not a base). A same-commit parent (rank 0 above)
-    // is closer than any strict ancestor, so it wins and no promotion happens.
-    if (!items.some((i) => i.rank === 0)) {
-      const parent = items.filter((i) => i.rank === 1).sort((a, b) => a.ahead - b.ahead)[0];
-      if (parent && parent.ahead <= PARENT_MAX_AHEAD) {
-        parent.description = `parent · ${parent.ahead} ahead`;
-        parent.rank = 0;
-      }
-    }
-    // Sort by bucket; within ancestors/parent, nearest first (fewest commits ahead) = stack order.
-    items.sort((a, b) => a.rank - b.rank || a.ahead - b.ahead);
-    // Always offer the current branch (= uncommitted working changes) so single-branch repos / being
-    // on the base branch still have something to pick.
-    if (cur) items.push({ label: cur, description: 'current · working changes', branch: cur, rank: 99, ahead: Infinity });
-    if (last) {
-      const i = items.findIndex((x) => x.branch === last);
-      if (i > 0) items.unshift(items.splice(i, 1)[0]); // last-used to the very top
-    }
-    return items;
-  })().catch((e) => {
-    vscode.window.showErrorMessage(`Could not list branches: ${e.message}`);
-    return [];
-  });
-
-  const pick = await vscode.window.showQuickPick(itemsPromise, {
-    placeHolder: 'Diff against which local branch?',
-  });
-  return pick ? pick.branch : null;
 }
 
 /** Files this branch changed vs base (merge-base, committed + uncommitted), deletes excluded. */
@@ -352,259 +285,6 @@ async function treeSetViewed(context, item, sel, makeViewed) {
   if (rels.length === 1) app.diffTree.revealFile(rels[0]);
 }
 
-/** Bridge review → SCM: git-add every file you've marked viewed, then commit in Source Control. */
-async function stageViewed(context) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  if (!cwd || !base) return;
-  const viewed = getViewed(context, base);
-  const files = app.diffTree.visibleFiles(cwd).filter((f) => isViewed(cwd, viewed, f)); // only the filtered slice
-  if (!files.length) {
-    vscode.window.showInformationMessage('No viewed files to stage.');
-    return;
-  }
-  try {
-    await gitAddChunked(cwd, files);
-  } catch (e) {
-    vscode.window.showErrorMessage(`git add failed: ${e.message}`);
-    return;
-  }
-  vscode.window.showInformationMessage(`Staged ${files.length} viewed file(s). Commit them in Source Control.`);
-}
-
-/** git-add the selected file(s) — per-row / multi-select staging. */
-async function stageFiles(context, item, sel) {
-  const cwd = getCwd();
-  const rels = selectedRels(item, sel);
-  if (!cwd || !rels.length) return;
-  try {
-    await gitAddChunked(cwd, rels);
-  } catch (e) {
-    vscode.window.showErrorMessage(`git add failed: ${e.message}`);
-    return;
-  }
-  vscode.window.setStatusBarMessage(`Staged ${rels.length} file(s). Commit in Source Control.`, 2500);
-}
-
-async function unstageFiles(context, item, sel) {
-  const cwd = getCwd();
-  const rels = selectedRels(item, sel);
-  if (!cwd || !rels.length) return;
-  try {
-    for (let i = 0; i < rels.length; i += 100) await git(cwd, ['restore', '--staged', '--', ...rels.slice(i, i + 100)]);
-  } catch (e) {
-    vscode.window.showErrorMessage(`git restore --staged failed: ${e.message}`);
-    return;
-  }
-  vscode.window.setStatusBarMessage(`Unstaged ${rels.length} file(s).`, 2500);
-}
-
-/** Assign the selected file(s) to a group (pick an existing one or name a new one). */
-async function addToGroup(context, item, sel) {
-  const base = app.diffTree?.base;
-  const rels = selectedRels(item, sel);
-  if (!base || !rels.length) return;
-  const groups = getGroups(context, base);
-  const NEW = '$(add) New group…';
-  const pick = await vscode.window.showQuickPick([NEW, ...groupNames(groups)], { placeHolder: 'Add to group' });
-  if (!pick) return;
-  let name = pick;
-  if (pick === NEW) {
-    name = (await vscode.window.showInputBox({ prompt: 'Group name' }))?.trim();
-    if (!name) return;
-  }
-  for (const r of rels) groups[r] = name;
-  await setGroups(context, base, groups);
-  refreshTree();
-}
-
-/** Remove the selected file(s) from whatever group they're in. */
-async function removeFromGroup(context, item, sel) {
-  const base = app.diffTree?.base;
-  const rels = selectedRels(item, sel);
-  if (!base || !rels.length) return;
-  const groups = getGroups(context, base);
-  for (const r of rels) delete groups[r];
-  await setGroups(context, base, groups);
-  refreshTree();
-}
-
-/** Group names to act on: the checked groups in the dropdown, else prompt for one. null = cancel/none. */
-async function targetGroupNames(context, placeHolder) {
-  const base = app.diffTree?.base;
-  const names = groupNames(getGroups(context, base));
-  if (!names.length) {
-    vscode.window.showInformationMessage('No groups yet — right-click files → Add to Group.');
-    return null;
-  }
-  if (app.diffTree.groupFilter && app.diffTree.groupFilter.length) return app.diffTree.groupFilter; // act on checked groups
-  const one = await vscode.window.showQuickPick(names, { placeHolder });
-  return one ? [one] : null;
-}
-const filesInGroups = (map, names) => Object.keys(map).filter((r) => names.includes(map[r]));
-const groupsTitle = (names) => (names.length === 1 ? `"${names[0]}"` : `${names.length} groups`);
-
-/** Stage every file in the target group(s) (then commit it in Source Control). */
-async function stageGroup(context) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  if (!cwd || !base) return;
-  const names = await targetGroupNames(context, 'Stage which group?');
-  if (!names) return;
-  const files = filesInGroups(getGroups(context, base), names);
-  if (!files.length) return;
-  const viewed = getViewed(context, base);
-  const unviewed = files.filter((f) => !isViewed(cwd, viewed, f)).length;
-  if (unviewed) {
-    const ok = await vscode.window.showWarningMessage(
-      `Stage ${groupsTitle(names)}? ${unviewed} of ${files.length} file(s) are still unviewed.`,
-      { modal: true },
-      'Stage anyway'
-    );
-    if (ok !== 'Stage anyway') return;
-  }
-  try {
-    await gitAddChunked(cwd, files);
-  } catch (e) {
-    vscode.window.showErrorMessage(`git add failed: ${e.message}`);
-    return;
-  }
-  vscode.window.setStatusBarMessage(`Staged ${groupsTitle(names)} (${files.length} file(s)). Commit in Source Control.`, 3000);
-}
-
-/** Mark every file in the target group(s) viewed. */
-async function markGroupViewed(context) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  if (!cwd || !base) return;
-  const names = await targetGroupNames(context, 'Mark which group viewed?');
-  if (!names) return;
-  const viewed = getViewed(context, base);
-  const groupFiles = filesInGroups(getGroups(context, base), names);
-  Object.assign(viewed, await viewedEntries(cwd, groupFiles));
-  await stageOnView(context, cwd, groupFiles);
-  await setViewed(context, base, viewed);
-  updateViewedContext(context);
-  refreshTree();
-}
-
-/** Open every file in the target group(s) (honors the active diff mode). */
-async function openGroup(context) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  if (!cwd || !base) return;
-  const names = await targetGroupNames(context, 'Open which group?');
-  if (!names) return;
-  const files = filesInGroups(getGroups(context, base), names);
-  if (!files.length) return;
-  if (files.length > MAX_OPEN_WITHOUT_CONFIRM) {
-    const ok = await vscode.window.showWarningMessage(`Open ${files.length} editors?`, { modal: true }, 'Open');
-    if (ok !== 'Open') return;
-  }
-  for (const f of files) await openReviewFile(context, cwd, base, f, { preview: false, preserveFocus: true });
-}
-
-/** Ungroup the target group(s) — remove their files (files untouched); the group(s) disappear. */
-async function ungroup(context) {
-  const base = app.diffTree?.base;
-  if (!base) return;
-  const names = await targetGroupNames(context, 'Ungroup which group?');
-  if (!names) return;
-  const groups = getGroups(context, base);
-  for (const r of Object.keys(groups)) if (names.includes(groups[r])) delete groups[r];
-  if (app.diffTree.groupFilter) app.diffTree.groupFilter = app.diffTree.groupFilter.filter((n) => !names.includes(n));
-  await setGroups(context, base, groups);
-  refreshTree();
-}
-
-async function clearGroups(context) {
-  const base = app.diffTree?.base;
-  if (!base) return;
-  await setGroups(context, base, {});
-  app.diffTree.groupFilter = null;
-  refreshTree();
-}
-
-/** Discard the selected files' changes — restore to HEAD (untracked files are deleted). */
-async function revertFiles(context, item, sel) {
-  const cwd = getCwd();
-  const rels = selectedRels(item, sel);
-  if (!cwd || !rels.length) return;
-  const what = rels.length === 1 ? `"${rels[0]}"` : `${rels.length} files`;
-  // Name the deletions only when the selection actually holds untracked files. Warning about
-  // deletion every time trains the user to skim past it, so it stops carrying weight on the runs
-  // where a file really does get deleted rather than reverted.
-  const untracked = rels.filter((r) => app.diffTree?.status.get(r) === 'U').length;
-  const delNote = untracked
-    ? ` ${untracked === 1 ? '1 untracked file' : `${untracked} untracked files`} will be DELETED.`
-    : '';
-  const ok = await vscode.window.showWarningMessage(
-    `Discard changes to ${what}?${delNote} This cannot be undone.`,
-    { modal: true },
-    'Discard'
-  );
-  if (ok !== 'Discard') return;
-  for (const rel of rels) {
-    try {
-      if (app.diffTree?.status.get(rel) === 'U') {
-        await vscode.workspace.fs.delete(vscode.Uri.file(path.join(cwd, rel))); // untracked → delete
-      } else {
-        await git(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', rel]);
-      }
-    } catch (e) {
-      vscode.window.showErrorMessage(`Revert failed for ${rel}: ${e.message}`);
-    }
-  }
-  await app.diffTree.load();
-}
-
-/** Restore file(s) to the content you last marked viewed (the review snapshot). The restored
- *  content hashes back to the mark, so the file flips back to Viewed automatically. */
-async function revertToViewed(context, item, sel) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  const rels = selectedRels(item, sel);
-  if (!cwd || !base || !rels.length) return;
-  const viewed = getViewed(context, base);
-  const withSnap = rels.filter((r) => core.reviewedBlob(viewed, r));
-  if (!withSnap.length) {
-    vscode.window.showInformationMessage('No last-viewed snapshot for the selection.');
-    return;
-  }
-  const what = withSnap.length === 1 ? `"${withSnap[0]}"` : `${withSnap.length} files`;
-  const ok = await vscode.window.showWarningMessage(
-    `Restore ${what} to the last-viewed content? Edits made since your review will be lost.`,
-    { modal: true },
-    'Restore'
-  );
-  if (ok !== 'Restore') return;
-  for (const rel of withSnap) {
-    try {
-      const bytes = await core.gitBlobBytes(cwd, core.reviewedBlob(viewed, rel));
-      await vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(cwd, rel)), bytes);
-    } catch (e) {
-      vscode.window.showErrorMessage(`Restore failed for ${rel}: ${e.message}`);
-    }
-  }
-  // Sync the index: a staged copy of the pre-revert content would keep Source Control showing
-  // phantom changes after the restore — re-add so the index matches the restored content.
-  try {
-    const out = await git(cwd, ['diff', '--cached', '--name-only', '--', ...withSnap]);
-    const resync = out.split('\n').map((s) => s.trim()).filter(Boolean);
-    if (resync.length) await gitAddChunked(cwd, resync);
-  } catch { /* best-effort */ }
-  await stageOnView(context, cwd, withSnap);
-  await app.diffTree.load();
-}
-
-/** Flip the stage-on-view setting (marking viewed also stages the file). */
-async function toggleStageOnView() {
-  const cfg = vscode.workspace.getConfiguration('vetty');
-  const next = !cfg.get('stageOnView', false);
-  await cfg.update('stageOnView', next, vscode.ConfigurationTarget.Global);
-  vscode.window.setStatusBarMessage(`Stage on View ${next ? 'enabled' : 'disabled'}`, 2500);
-}
-
 /** Fetch all remotes (so origin/* bases are current), then reload. */
 async function fetchAndRefresh(context) {
   const cwd = getCwd();
@@ -621,14 +301,6 @@ async function fetchAndRefresh(context) {
       await app.diffTree.load();
     }
   );
-}
-
-/** Open every file in a tree group (Unviewed / Viewed / Untracked) via the shared open flow. */
-async function treeOpenGroup(item) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  if (!cwd || !base || !item?.files?.length) return;
-  await openFiles(cwd, base, item.files);
 }
 
 async function treeMarkAllViewed(context, item) {
@@ -697,9 +369,6 @@ async function treeOpenUnviewed(context) {
 module.exports = {
   pickFolder, pickBranch, changedFiles, openFiles, openAll, openByViewed,
   applyViewed, clearViewed, selectedRels, copyPaths,
-  treeOpenFile, treeOpenDiff, treeSetViewed, treeSetIgnored,
-  stageViewed, stageFiles, unstageFiles, addToGroup, removeFromGroup,
-  stageGroup, markGroupViewed, openGroup, ungroup, clearGroups,
-  revertFiles, revertToViewed, toggleStageOnView, fetchAndRefresh, treeOpenGroup, treeMarkAllViewed, treeMarkAllUnviewed,
-  treePickBranch, treeOpenUnviewed,
+  treeOpenFile, treeOpenDiff, treeSetViewed, treeSetIgnored, fetchAndRefresh,
+  treeMarkAllViewed, treeMarkAllUnviewed, treePickBranch, treeOpenUnviewed,
 };
