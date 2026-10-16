@@ -6,13 +6,11 @@ import com.intellij.diff.chains.SimpleDiffRequestChain
 import com.intellij.diff.editor.ChainDiffVirtualFile
 import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.diff.util.DiffUserDataKeysEx
-import com.intellij.execution.configurations.GeneralCommandLine
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.ToggleAction
-import com.intellij.execution.util.ExecUtil
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -83,37 +81,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
 
     private fun repoRoot(): String? = project.basePath
 
-    /** Run git in the repo root; returns stdout, or "" on any failure (caller-tolerant). */
-    private fun git(vararg args: String): String {
-        val root = repoRoot() ?: return ""
-        // core.quotePath=false → paths with spaces/unicode come out raw (not "\303\266…"), so they resolve.
-        val cmd = GeneralCommandLine(mutableListOf("git", "-c", "core.quotePath=false", *args))
-            .withWorkDirectory(root)
-            .withCharset(StandardCharsets.UTF_8)
-        val t0 = System.currentTimeMillis()
-        return try {
-            val out = ExecUtil.execAndGetOutput(cmd)
-            dbg { "git ${args.take(4).joinToString(" ")}${if (args.size > 4) " …" else ""} — ${System.currentTimeMillis() - t0}ms" }
-            if (out.exitCode == 0) out.stdout else ""
-        } catch (e: Exception) {
-            ""
-        }
-    }
-
-    /** Run git feeding [input] on stdin; returns stdout ("" on failure). Used for hash-object --stdin. */
-    private fun gitInput(input: ByteArray, vararg args: String): String {
-        val root = repoRoot() ?: return ""
-        return try {
-            // Discard stderr so a chatty git can't fill the pipe and deadlock the read below.
-            val p = ProcessBuilder(listOf("git", *args))
-                .directory(java.io.File(root))
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start()
-            p.outputStream.use { it.write(input) }
-            val out = p.inputStream.readBytes().toString(Charsets.UTF_8)
-            if (p.waitFor() == 0) out else ""
-        } catch (e: Exception) { "" }
-    }
+    private val git = VettyGit { repoRoot() }
 
     /** git blob id of the file's CURRENT in-memory content (unsaved-aware), to compare against a snapshot blob. */
     private fun documentBlob(rel: String): String? {
@@ -121,7 +89,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         val bytes = com.intellij.openapi.application.ReadAction.compute<ByteArray?, RuntimeException> {
             FileDocumentManager.getInstance().getDocument(vf)?.text?.toByteArray(Charsets.UTF_8)
         } ?: return null
-        return gitInput(bytes, "hash-object", "--stdin").trim().ifEmpty { null }
+        return git.withInput(bytes, "hash-object", "--stdin").trim().ifEmpty { null }
     }
 
     fun branches(): List<String> =
@@ -843,15 +811,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     fun revertToLastViewed(rel: String): Boolean {
         val blob = reviewedBlob(rel) ?: return false
         val root = repoRoot() ?: return false
-        // Binary-safe blob read (ExecUtil's string stdout would corrupt binaries).
-        val bytes = try {
-            val p = ProcessBuilder(listOf("git", "cat-file", "blob", blob))
-                .directory(java.io.File(root))
-                .redirectError(ProcessBuilder.Redirect.DISCARD)
-                .start()
-            val out = p.inputStream.readBytes()
-            if (p.waitFor() == 0) out else return false
-        } catch (e: Exception) { return false }
+        val bytes = git.blobBytes(blob) ?: return false
         java.io.File(root, rel).writeBytes(bytes)
         // Sync the index: a staged copy of the pre-revert content would keep the commit pane
         // showing phantom changes after the restore.
