@@ -1,0 +1,5 @@
+# Shell scripts and the Gradle wrapper must stay LF or they break on macOS/Linux checkouts made from Windows.
+*.sh text eol=lf
+gradlew text eol=lf
+# Batch files stay CRLF (cmd.exe misparses LF-only labels in some cases).
+*.bat text eol=crlf

@@ -58,11 +58,12 @@ Scripted alternative — unzip into Rider's plugins folder (each Rider version h
   done
   ```
 
-Or build it: `gradle -p <clone>/jetbrains buildPlugin` (Gradle 8.10+ and a JDK 17+; macOS: `brew install gradle`)
+Or build it with the bundled Gradle wrapper (needs only a JDK 17+; it downloads Gradle itself):
+`cd <clone>/jetbrains && ./gradlew buildPlugin` (Windows: `gradlew.bat buildPlugin`)
 → `jetbrains/build/distributions/vetty-rider-<version>.zip`. Restart Rider afterwards.
 
-`release.bat` in the repo is the Windows release script (bump, tag, push); it's not part of installing and has no macOS twin —
-on a Mac, tag and push by hand if you ever release from there.
+Releasing (not part of installing): `release.bat` on Windows, `./release.sh` on macOS/Linux — same steps
+(bump patch, one release commit, annotated tag, push; the tag push fires the GitHub build).
 
 ## 5. Verify
 
