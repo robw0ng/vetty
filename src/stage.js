@@ -74,7 +74,7 @@ async function revertFiles(context, item, sel) {
   for (const rel of rels) {
     try {
       if (app.diffTree?.status.get(rel) === 'U') {
-        await vscode.workspace.fs.delete(vscode.Uri.file(path.join(cwd, rel))); // untracked → delete
+        await vscode.workspace.fs.delete(vscode.Uri.file(path.join(cwd, rel)));
       } else {
         await git(cwd, ['restore', '--source=HEAD', '--staged', '--worktree', '--', rel]);
       }

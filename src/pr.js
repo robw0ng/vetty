@@ -183,7 +183,7 @@ async function reviewPr(context) {
   await vscode.commands.executeCommand('setContext', 'vetty.reviewing', true);
   updateViewedContext(context);
   updatePrTitle(context);
-  await fetchPrComments(cwd, repo, pr.number); // pull existing review comments
+  await fetchPrComments(cwd, repo, pr.number);
   buildPrThreads(cwd, new Set(['open'])); // show open feedback by default on checkout
   await app.diffTree.load();
   vscode.window.showInformationMessage(`Reviewing PR #${pr.number} vs origin/${pr.baseRefName}.`);

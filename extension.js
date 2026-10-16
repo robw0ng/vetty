@@ -1,9 +1,10 @@
 // Entry point: wires the shared refs and registers everything. The behavior lives in src/:
-//   core.js     — git/gh plumbing, persisted review state, base-branch memory + inference
-//   tree.js     — DiffTree/TodoTree views, decorations, open/navigate/toggle behaviors
+//   core.js (app, git, review-state, base, guided, content) — plumbing: process helpers, persisted
+//                 review state, base-branch inference, Claude's review file, diff content providers
+//   tree.js / todos.js / comments-view.js — the three views; review-nav.js — open/navigate/toggles
 //   search.js   — the Search webview + scoped in-panel text search
-//   comments.js — inline review comments + the GitHub PR review flow
-//   commands.js — command handlers (pickers, bulk opens, staging, groups, viewed/ignored)
+//   comments.js / pr.js / guided-notes.js — local threads, the GitHub PR flow, Claude's notes
+//   commands.js / stage.js / groups.js / branchpick.js — command handlers and the pickers
 const vscode = require('vscode');
 const core = require('./src/core');
 const { app } = core;
@@ -128,7 +129,6 @@ function activate(context) {
       app.todoTree.load();
     })
   );
-  // Review comments: register the comment controller, hydrate stored comments as editors open.
   comments.initComments(context);
 
   vscode.commands.executeCommand('setContext', 'vetty.nested', app.diffTree.nested);
