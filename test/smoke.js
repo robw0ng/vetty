@@ -1,4 +1,4 @@
-// Smoke test for the pure helpers in lib.js + the viewed-state EOL behavior in src/core.js.
+// Smoke test for the pure helpers in lib/ + the viewed-state EOL behavior in src/core.js.
 // Run: node test/smoke.js
 'use strict';
 const assert = require('assert');

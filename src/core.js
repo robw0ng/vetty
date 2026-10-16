@@ -376,7 +376,7 @@ const blobContentProvider = {
   },
 };
 
-const { TODO_RE } = require('../lib'); // comment-leader / `LABEL:` only — see lib.js
+const { TODO_RE } = require('../lib'); // comment-leader / `LABEL:` only — see lib/todo.js
 
 /** TODO/FIXME markers on added diff lines vs `ref` + every line of untracked files. */
 async function findTodos(cwd, ref) {
