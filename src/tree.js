@@ -296,7 +296,7 @@ class DiffTree {
     require('./search').postSearchCounts(); // lazy: search requires this module's app refs via core
     fileDecorations.refresh();
     app.todoTree?.load();
-    require('./comments').syncAiThreads(); // Claude notes: rebuilt only when the review file/branch changed
+    require('./guided-notes').syncAiThreads(); // Claude notes: rebuilt only when the review file/branch changed
     await this._guidedStatus(cwd);
     // Publish the exact review set so a Claude session annotates what Vetty lists — not its own guess
     // at the diff (Vetty's base is often a parent branch, and it counts uncommitted + untracked files).

@@ -12,6 +12,8 @@ const todos = require('./src/todos');
 const nav = require('./src/review-nav');
 const search = require('./src/search');
 const comments = require('./src/comments');
+const commentsView = require('./src/comments-view');
+const pr = require('./src/pr');
 const cmds = require('./src/commands');
 
 /** @param {vscode.ExtensionContext} context */
@@ -28,15 +30,15 @@ function activate(context) {
     (app.diffTreeView = vscode.window.createTreeView('vettyView', { treeDataProvider: app.diffTree, canSelectMany: true })),
     (app.todoTreeView = vscode.window.createTreeView('vettyTodos', { treeDataProvider: app.todoTree, canSelectMany: true })),
     (app.commentsTreeView = vscode.window.createTreeView('vettyComments', {
-      treeDataProvider: (app.commentsTree = new comments.CommentsTree(context)),
+      treeDataProvider: (app.commentsTree = new commentsView.CommentsTree(context)),
       canSelectMany: true,
     })),
-    vscode.commands.registerCommand('vetty.commentGoTo', (rel, line, anchor) => comments.commentGoTo(rel, line, anchor)),
-    vscode.commands.registerCommand('vetty.commentOpen', (item) => comments.commentOpen(context, item)),
-    vscode.commands.registerCommand('vetty.commentEdit', (item) => comments.commentEdit(context, item)),
-    vscode.commands.registerCommand('vetty.commentCopy', (item, sel) => comments.commentCopy(context, item, sel)),
-    vscode.commands.registerCommand('vetty.copySection', (item) => comments.copySection(context, item)),
-    vscode.commands.registerCommand('vetty.commentDelete', (item, sel) => comments.commentDelete(context, item, sel)),
+    vscode.commands.registerCommand('vetty.commentGoTo', (rel, line, anchor) => commentsView.commentGoTo(rel, line, anchor)),
+    vscode.commands.registerCommand('vetty.commentOpen', (item) => commentsView.commentOpen(context, item)),
+    vscode.commands.registerCommand('vetty.commentEdit', (item) => commentsView.commentEdit(context, item)),
+    vscode.commands.registerCommand('vetty.commentCopy', (item, sel) => commentsView.commentCopy(context, item, sel)),
+    vscode.commands.registerCommand('vetty.copySection', (item) => commentsView.copySection(context, item)),
+    vscode.commands.registerCommand('vetty.commentDelete', (item, sel) => commentsView.commentDelete(context, item, sel)),
     vscode.commands.registerCommand('vetty.openTodo', (rel, line) => todos.openTodo(rel, line)),
     vscode.commands.registerCommand('vetty.copyTodos', () => todos.copyTodos()),
     vscode.commands.registerCommand('vetty.todoOpenItem', (item) => todos.todoOpenItem(item)),
@@ -77,14 +79,14 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.showMore', (key) => nav.showMore(key)),
     vscode.commands.registerCommand('vetty.fetch', () => cmds.fetchAndRefresh(context)),
     vscode.commands.registerCommand('vetty.pickFolder', () => cmds.pickFolder(context)),
-    vscode.commands.registerCommand('vetty.reviewPr', () => comments.reviewPr(context)),
-    vscode.commands.registerCommand('vetty.finishReview', () => comments.finishReview(context)),
-    vscode.commands.registerCommand('vetty.submitReview', () => comments.submitReview(context)),
-    vscode.commands.registerCommand('vetty.pullPrComments', () => comments.pullPrComments()),
+    vscode.commands.registerCommand('vetty.reviewPr', () => pr.reviewPr(context)),
+    vscode.commands.registerCommand('vetty.finishReview', () => pr.finishReview(context)),
+    vscode.commands.registerCommand('vetty.submitReview', () => pr.submitReview(context)),
+    vscode.commands.registerCommand('vetty.pullPrComments', () => pr.pullPrComments()),
     vscode.commands.registerCommand('vetty.nextUnviewed', () => nav.navigateUnviewed(context, 1)),
     vscode.commands.registerCommand('vetty.prevUnviewed', () => nav.navigateUnviewed(context, -1)),
     vscode.commands.registerCommand('vetty.viewCurrent', () => cmds.applyViewed(context)),
-    vscode.commands.registerCommand('vetty.togglePrMode', () => comments.togglePrMode()),
+    vscode.commands.registerCommand('vetty.togglePrMode', () => pr.togglePrMode()),
     vscode.commands.registerCommand('vetty.stageViewed', () => cmds.stageViewed(context)),
     vscode.commands.registerCommand('vetty.stageFile', (item, sel) => cmds.stageFiles(context, item, sel)),
     vscode.commands.registerCommand('vetty.unstageFile', (item, sel) => cmds.unstageFiles(context, item, sel)),
@@ -112,7 +114,7 @@ function activate(context) {
       if (!e.affectsConfiguration('vetty.pullRequests.enabled')) return;
       await core.updatePrMode();
       // Disabling mid-review → clean up the checkout so the user isn't stranded on the PR branch.
-      if (!core.prEnabled() && context.workspaceState.get(core.REVIEW_KEY)) await comments.finishReview(context);
+      if (!core.prEnabled() && context.workspaceState.get(core.REVIEW_KEY)) await pr.finishReview(context);
     }),
     vscode.commands.registerCommand('vetty.treeOpenGroup', (item) => cmds.treeOpenGroup(item)),
     vscode.commands.registerCommand('vetty.treeMarkAllViewed', (item) => cmds.treeMarkAllViewed(context, item)),
@@ -134,7 +136,7 @@ function activate(context) {
   vscode.commands.executeCommand('setContext', 'vetty.guidedNotesExpanded', core.guidedNotesExpanded(context));
   vscode.commands.executeCommand('setContext', 'vetty.hideWhitespace', app.diffTree.hideWhitespace);
   vscode.commands.executeCommand('setContext', 'vetty.reviewing', !!context.workspaceState.get(core.REVIEW_KEY));
-  comments.updatePrTitle(context);
+  pr.updatePrTitle(context);
 
   (async () => {
     // Resolve the repo toplevel first — it can sit ABOVE the opened folder (workspace = subdir of

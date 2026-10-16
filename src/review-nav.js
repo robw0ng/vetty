@@ -22,7 +22,7 @@ async function openMatch(rel, line, col, len) {
 /** Open options that land on the file's first comment (else unchanged: editors reveal the first change). */
 function atFirstComment(context, rel, opts = {}) {
   if (opts.selection || app.diffTree?.deleted?.has(rel)) return opts; // deleted: no right side to scroll
-  const line = require('./comments').firstCommentLine(context, rel);
+  const line = require('./guided-notes').firstCommentLine(context, rel);
   return line === null ? opts : { ...opts, selection: new vscode.Range(line, 0, line, 0) };
 }
 
@@ -140,7 +140,7 @@ async function toggleGuidedReview(context) {
   const next = !core.guidedReviewOn(context);
   await context.workspaceState.update('vetty.guidedReview', next);
   await vscode.commands.executeCommand('setContext', 'vetty.guidedReview', next);
-  require('./comments').syncAiThreads(); // show / hide the notes
+  require('./guided-notes').syncAiThreads(); // show / hide the notes
   refreshTree();
   const r = core.claudeReview();
   if (next && !r?.order.size && !r?.comments.length) {
@@ -158,7 +158,7 @@ async function toggleGuidedNotes(context) {
   const next = !core.guidedNotesExpanded(context);
   await context.workspaceState.update('vetty.guidedNotesExpanded', next);
   await vscode.commands.executeCommand('setContext', 'vetty.guidedNotesExpanded', next);
-  require('./comments').applyGuidedNotesState();
+  require('./guided-notes').applyGuidedNotesState();
 }
 
 /** Since-review overlay toggle: unviewed files diff against your last-reviewed snapshot. */
