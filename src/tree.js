@@ -1,14 +1,13 @@
-// The Activity Bar views: DiffTree (changed files, Unviewed/Viewed/Untracked), TodoTree, file
-// decorations, and the open/navigate/toggle behaviors that belong to them.
+// The Review view: DiffTree (changed files, Unviewed/Viewed/Ignored), its file decorations, and the
+// per-file row grouping shared with the TODO and Comments views.
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
-const { parseNumstat, todoCol, ago } = require('../lib');
+const { parseNumstat, ago } = require('../lib');
 const core = require('./core');
 const {
   app, getCwd, git, untrackedFiles, getViewed, setViewed, viewedEntries, getIgnored, getGroups, setGroups, isViewed,
-  resolveBase, mergeBaseRef, lastBranch, shortRef, baseUriFor, blobUriFor, reviewedBlob,
-  DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff, findTodos, refreshTree,
+  resolveBase, mergeBaseRef, lastBranch, shortRef, DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff,
 } = core;
 
 const PAGE_SIZE = 500; // flat-view rows per group before a "Show more" row appears
@@ -337,7 +336,7 @@ class DiffTree {
       if (forBranch && forBranch !== core.activeBranchName()) return; // another branch's — silent
       vscode.window
         .showInformationMessage(`Guided review ready for ${forBranch || 'this branch'}.`, 'Turn on')
-        .then((pick) => pick === 'Turn on' && toggleGuidedReview(this.context));
+        .then((pick) => pick === 'Turn on' && require('./review-nav').toggleGuidedReview(this.context));
     } else if (review) {
       const n = this.steps().size;
       vscode.window.setStatusBarMessage(`Guided review updated: ${n} file${n === 1 ? '' : 's'}, ${review.comments.length} notes`, 4000);
@@ -589,53 +588,6 @@ class DiffTree {
   }
 }
 
-/** Side-panel "New TODOs" view: TODO/FIXME markers introduced vs the selected branch. */
-class TodoTree {
-  constructor(context) {
-    this.context = context;
-    this._emitter = new vscode.EventEmitter();
-    this.onDidChangeTreeData = this._emitter.event;
-    this.items = [];
-  }
-  refresh() {
-    this._emitter.fire();
-  }
-  async load() {
-    const cwd = getCwd();
-    const ref = app.diffTree?.listRef; // honor the active diff mode (branch merge-base vs HEAD)
-    this.items = cwd && ref ? await findTodos(cwd, ref) : [];
-    this.refresh();
-  }
-  getTreeItem(el) {
-    return el;
-  }
-  getChildren(el) {
-    const cwd = getCwd();
-    if (el) {
-      return el.todos.map((t) => {
-        const msg = t.text.replace(/^\s*(\/\/+|#+|\/\*+|\*+|<!--|--)\s?/, '').replace(/\s*(\*\/|-->)\s*$/, '').trim();
-        const it = new vscode.TreeItem(msg || t.text);
-        it.description = `:${t.line}`; // the file is the parent row
-        it.tooltip = `${t.rel}:${t.line}\n\n${t.text}`;
-        it.iconPath = new vscode.ThemeIcon('checklist');
-        it.todo = t; // for multi-select copy
-        it.contextValue = 'vettyTodo'; // gates the row menu/buttons (the "No TODOs" row has none)
-        it.command = { command: 'vetty.openTodo', title: 'Open', arguments: [t.rel, t.line] };
-        return it;
-      });
-    }
-    // Slice TODOs by the Review panel's active filter (group / scope / name / search) for a focused view.
-    const visible = cwd && app.diffTree ? new Set(app.diffTree.visibleFiles(cwd)) : null;
-    const items = visible ? this.items.filter((t) => visible.has(t.rel)) : this.items;
-    if (!items.length) {
-      const it = new vscode.TreeItem('No TODOs');
-      it.iconPath = new vscode.ThemeIcon('check');
-      return [it];
-    }
-    return fileGroups(cwd, items.map((t) => [t.rel, t]), 'todo').map((g) => ((g.todos = g.entries), g));
-  }
-}
-
 /** Parent rows for a per-file list (TODOs, comments): file icon + name, dir + count dimmed, expanded.
  *  `pairs` = [rel, entry][]; returns TreeItems carrying `.rel` and `.entries` (insertion order kept). */
 function fileGroups(cwd, pairs, kind) {
@@ -655,223 +607,4 @@ function fileGroups(cwd, pairs, kind) {
   });
 }
 
-/** TODO entries behind tree rows — a file row stands for all its TODOs. */
-function todosOf(items) {
-  return items.flatMap((i) => (i?.todo ? [i.todo] : i?.todos || []));
-}
-
-/** Ctrl/Cmd+C in the Todos view: copy the selected TODOs as `file:line — text`. */
-async function copyTodos() {
-  const lines = todosOf(app.todoTreeView?.selection || []).map((t) => `- ${t.rel}:${t.line} — ${t.text.trim()}`);
-  if (!lines.length) return;
-  await vscode.env.clipboard.writeText(lines.join('\n'));
-  vscode.window.setStatusBarMessage(`Copied ${lines.length} TODO(s)`, 2000);
-}
-
-/** Right-click "Go to" on a TODO row (row click does the same; this covers the menu). */
-async function todoOpenItem(item) {
-  if (item?.todo) await openTodo(item.todo.rel, item.todo.line);
-}
-
-/** Copy the clicked TODO row (or the multi-selection) as paste-ready bullets. */
-async function todoCopyItems(item, sel) {
-  const items = Array.isArray(sel) && sel.length ? sel : item ? [item] : [];
-  const lines = todosOf(items).map((t) => `- ${t.rel}:${t.line} — ${t.text.trim()}`);
-  if (!lines.length) return;
-  await vscode.env.clipboard.writeText(lines.join('\n'));
-  vscode.window.setStatusBarMessage(`Copied ${lines.length} TODO(s)`, 2000);
-}
-
-/** Toolbar: copy ALL currently-shown TODOs (respects the active Review filters) as bullets. */
-async function exportTodos() {
-  const cwd = getCwd();
-  const visible = cwd && app.diffTree ? new Set(app.diffTree.visibleFiles(cwd)) : null;
-  const items = (app.todoTree?.items || []).filter((t) => !visible || visible.has(t.rel));
-  if (!items.length) {
-    vscode.window.showInformationMessage('No TODOs to export.');
-    return;
-  }
-  await vscode.env.clipboard.writeText(items.map((t) => `- ${t.rel}:${t.line} — ${t.text.trim()}`).join('\n') + '\n');
-  vscode.window.showInformationMessage(`Copied ${items.length} TODO(s) to the clipboard.`);
-}
-
-async function openTodo(rel, line) {
-  const cwd = getCwd();
-  if (!cwd) return;
-  const uri = vscode.Uri.file(path.join(cwd, rel));
-  const doc = await vscode.workspace.openTextDocument(uri);
-  const l = Math.min(Math.max(line - 1, 0), Math.max(doc.lineCount - 1, 0));
-  const text = doc.lineAt(l).text;
-  const col = todoCol(text); // highlight the marker → end of line, like a search hit
-  const sel = col >= 0 ? new vscode.Range(l, col, l, text.length) : new vscode.Range(l, 0, l, 0);
-  await vscode.window.showTextDocument(doc, { selection: sel });
-}
-
-/** Open a file and select (highlight) the matched text at a search hit. */
-async function openMatch(rel, line, col, len) {
-  const cwd = getCwd();
-  if (!cwd) return;
-  const uri = vscode.Uri.file(path.join(cwd, rel));
-  const sel = new vscode.Range(line - 1, col, line - 1, col + len);
-  const doc = await vscode.workspace.openTextDocument(uri);
-  await vscode.window.showTextDocument(doc, { selection: sel });
-}
-
-/** Open one file's diff: since-review overlay wins when active; otherwise the range's base.
- *  Deleted files diff against an EMPTY right side (there's no working file to show). */
-/** Open options that land on the file's first comment (else unchanged: editors reveal the first change). */
-function atFirstComment(context, rel, opts = {}) {
-  if (opts.selection || app.diffTree?.deleted?.has(rel)) return opts; // deleted: no right side to scroll
-  const line = require('./comments').firstCommentLine(context, rel);
-  return line === null ? opts : { ...opts, selection: new vscode.Range(line, 0, line, 0) };
-}
-
-function openOneDiff(context, cwd, base, rel, opts) {
-  const fileUri = vscode.Uri.file(path.join(cwd, rel));
-  const gone = app.diffTree?.deleted?.has(rel);
-  opts = atFirstComment(context, rel, opts); // selection set → the diff editor skips its jump to the first change
-  const rightUri = gone ? baseUriFor(fileUri, '') : fileUri; // ref '' → the provider returns ''
-  const rightLabel = gone ? 'deleted' : 'working';
-  if (hasSinceReviewDiff(context, cwd, base, rel)) {
-    const blob = reviewedBlob(getViewed(context, base), rel);
-    return vscode.commands.executeCommand('vscode.diff', blobUriFor(fileUri, blob), rightUri, `${rel} (last viewed ↔ ${rightLabel})`, opts);
-  }
-  // Uncommitted-only rows (branch range) have no merge-base diff by definition — show vs HEAD.
-  if (diffRange(context) === 'commit' || app.diffTree?.wtOnly?.has(rel)) {
-    // Working tree vs HEAD = uncommitted changes only. New/untracked files → empty left side.
-    return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, 'HEAD'), rightUri, `${rel} (uncommitted${gone ? ' ↔ deleted' : ''})`, opts);
-  }
-  const ref = (app.diffTree && app.diffTree.baseRef) || base; // whole branch: diff against the merge-base
-  return vscode.commands.executeCommand('vscode.diff', baseUriFor(fileUri, ref), rightUri, `${rel} (${base} ↔ ${rightLabel})`, opts);
-}
-
-/** Open a changed file the right way: whole file for new files, else its diff. */
-async function openReviewFile(context, cwd, base, rel, opts = { preview: true }) {
-  if (app.diffTree.added.has(rel) && !hasSinceReviewDiff(context, cwd, base, rel)) {
-    await vscode.window.showTextDocument(vscode.Uri.file(path.join(cwd, rel)), atFirstComment(context, rel, opts));
-  } else {
-    await openOneDiff(context, cwd, base, rel, opts);
-  }
-}
-
-/** j/k navigation: open the next/prev unviewed file relative to the active one. */
-async function navigateUnviewed(context, dir) {
-  const cwd = getCwd();
-  const base = app.diffTree?.base;
-  if (!cwd || !base) return;
-  const viewed = getViewed(context, base);
-  const unviewed = app.diffTree.visibleFiles(cwd).filter((f) => !isViewed(cwd, viewed, f)); // within the filtered slice
-  if (!unviewed.length) {
-    vscode.window.setStatusBarMessage('No unviewed files', 2000);
-    return;
-  }
-  const cur = core.activeRelPath(cwd);
-  const idx = cur ? unviewed.indexOf(cur) : -1;
-  const next =
-    idx >= 0 ? unviewed[(idx + dir + unviewed.length) % unviewed.length] : unviewed[dir > 0 ? 0 : unviewed.length - 1];
-  await openReviewFile(context, cwd, base, next);
-  app.diffTree.revealFile(next); // highlight it in the list
-}
-
-/** Expand all groups + their folders (VS Code expands up to 3 levels per reveal). */
-async function expandAll() {
-  if (!app.diffTree || !app.diffTreeView) return;
-  const roots = app.diffTree.getChildren();
-  for (const g of Array.isArray(roots) ? roots : []) {
-    if (!g || !g.files) continue; // skip the welcome/placeholder item
-    try {
-      await app.diffTreeView.reveal(g, { select: false, focus: false, expand: 3 });
-    } catch {
-      // reveal can reject if the view isn't ready — ignore
-    }
-  }
-}
-
-/** Collapse the nested folders but leave the Unviewed/Viewed/Untracked groups expanded. */
-async function collapseFolders() {
-  if (!app.diffTree || !app.diffTreeView) return;
-  await vscode.commands.executeCommand('workbench.actions.treeView.vettyView.collapseAll'); // collapses everything
-  const roots = app.diffTree.getChildren();
-  for (const g of Array.isArray(roots) ? roots : []) {
-    if (!g || !g.files) continue;
-    try {
-      await app.diffTreeView.reveal(g, { select: false, focus: false, expand: 1 }); // re-open just the group (folders stay collapsed)
-    } catch {
-      // ignore
-    }
-  }
-}
-
-function showMore(groupKey) {
-  if (!app.diffTree) return;
-  app.diffTree.pageLimits[groupKey] = (app.diffTree.pageLimits[groupKey] || PAGE_SIZE) + PAGE_SIZE;
-  app.diffTree.refresh();
-}
-
-async function toggleNesting(context) {
-  if (!app.diffTree) return;
-  app.diffTree.nested = !app.diffTree.nested;
-  await context.workspaceState.update('vetty.nested', app.diffTree.nested);
-  await vscode.commands.executeCommand('setContext', 'vetty.nested', app.diffTree.nested);
-  refreshTree();
-}
-
-async function toggleWhitespace(context) {
-  if (!app.diffTree) return;
-  app.diffTree.hideWhitespace = !app.diffTree.hideWhitespace;
-  await context.workspaceState.update('vetty.hideWhitespace', app.diffTree.hideWhitespace);
-  await vscode.commands.executeCommand('setContext', 'vetty.hideWhitespace', app.diffTree.hideWhitespace);
-  await app.diffTree.load(); // realChanged is only computed while the toggle is on → needs a reload, not a re-render
-}
-
-/** Range toggle: whole-branch (vs merge-base) ⇄ since-last-commit (vs HEAD). Changes the file set. */
-async function toggleRange(context) {
-  const next = diffRange(context) === 'commit' ? 'branch' : 'commit';
-  await context.workspaceState.update('vetty.diffRange', next);
-  await vscode.commands.executeCommand('setContext', 'vetty.diffRange', next);
-  await app.diffTree.load(); // the listed file set differs (branch changes vs uncommitted-vs-HEAD)
-  vscode.window.setStatusBarMessage(`Range: ${DIFF_RANGE_SHORT[next]}`, 2000);
-}
-
-/** Guided Review: on = Claude's review order + Claude's notes; off = path order, no Claude notes. */
-async function toggleGuidedReview(context) {
-  const next = !core.guidedReviewOn(context);
-  await context.workspaceState.update('vetty.guidedReview', next);
-  await vscode.commands.executeCommand('setContext', 'vetty.guidedReview', next);
-  require('./comments').syncAiThreads(); // show / hide the notes
-  refreshTree();
-  const r = core.claudeReview();
-  if (next && !r?.order.size && !r?.comments.length) {
-    const other = core.claudeReviewFileBranch();
-    vscode.window.showInformationMessage(
-      other && other !== core.activeBranchName()
-        ? `The guided review on disk is for "${other}" — you're on "${core.activeBranchName()}". Ask Claude to "annotate this branch for Vetty".`
-        : 'No guided review for this branch yet. Ask Claude to "annotate this branch for Vetty".'
-    );
-  } else vscode.window.setStatusBarMessage(`Guided review ${next ? 'on' : 'off'}`, 2000);
-}
-
-/** Guided notes expanded ⇄ collapsed in the editor (big-picture notes are always expanded). */
-async function toggleGuidedNotes(context) {
-  const next = !core.guidedNotesExpanded(context);
-  await context.workspaceState.update('vetty.guidedNotesExpanded', next);
-  await vscode.commands.executeCommand('setContext', 'vetty.guidedNotesExpanded', next);
-  require('./comments').applyGuidedNotesState();
-}
-
-/** Since-review overlay toggle: unviewed files diff against your last-reviewed snapshot. */
-async function toggleSinceReview(context) {
-  const next = !sinceReviewOn(context);
-  await context.workspaceState.update('vetty.sinceReview', next);
-  await vscode.commands.executeCommand('setContext', 'vetty.sinceReview', next);
-  await app.diffTree.load();
-  vscode.window.setStatusBarMessage(`Compare: ${next ? 'last viewed' : 'base'}`, 2000);
-}
-
-module.exports = {
-  DiffTree, TodoTree, fileDecorations, fileGroups,
-  copyTodos, openTodo, openMatch, todoOpenItem, todoCopyItems, exportTodos,
-  openOneDiff, openReviewFile, navigateUnviewed, atFirstComment,
-  expandAll, collapseFolders, showMore,
-  toggleNesting, toggleWhitespace, toggleRange, toggleSinceReview, toggleGuidedReview, toggleGuidedNotes,
-};
+module.exports = { DiffTree, fileDecorations, fileGroups, untrackedLineCount, PAGE_SIZE };

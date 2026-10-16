@@ -11,7 +11,7 @@ const {
   MAX_REL_BRANCHES, PARENT_MAX_AHEAD, MAX_OPEN_WITHOUT_CONFIRM, FOLDER_KEY,
   workspaceFolderPath, resolveRepoRoot, watchGitDir, detectGh, hashCache, baseUriFor,
 } = core;
-const { openOneDiff, openReviewFile, atFirstComment } = require('./tree');
+const { openOneDiff, openReviewFile, atFirstComment } = require('./review-nav');
 
 /** Multi-root: pick which workspace folder Vetty reviews. Remembered per workspace. */
 async function pickFolder(context) {
