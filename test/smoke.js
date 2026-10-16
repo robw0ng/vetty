@@ -1,4 +1,4 @@
-// Smoke test for the pure helpers in lib/ + the viewed-state EOL behavior in src/core.js.
+// Smoke test for the pure helpers in lib/ + the viewed-state EOL behavior in src/ (via core).
 // Run: node test/smoke.js
 'use strict';
 const assert = require('assert');
@@ -235,7 +235,8 @@ function ownIndexWritesAreSuppressed() {
   const idxUri = { fsPath: path.join(dir, '.git', 'index') };
 
   // A fresh core whose workspace is the temp repo (resolveRepoRoot needs a folder to look at).
-  delete require.cache[require.resolve('../src/core.js')];
+  // core is an aggregator, so every cached src module has to go, not just core.js.
+  for (const k of Object.keys(require.cache)) if (k.startsWith(path.join(__dirname, '..', 'src'))) delete require.cache[k];
   const origLoad = Module._load;
   Module._load = (r, p, m) => (r === 'vscode'
     ? {
