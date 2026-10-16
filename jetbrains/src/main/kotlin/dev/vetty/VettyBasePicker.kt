@@ -49,11 +49,11 @@ class VettyBasePicker(private val project: Project, private val rows: List<Vetty
         val accent = JBUI.CurrentTheme.Focus.focusColor().let { c ->
             val hsb = Color.RGBtoHSB(c.red, c.green, c.blue, null); (hsb[0] * 360).toDouble()
         }
-        VettyParse.branchPalette(rows.size, accent).map { h -> VettyParse.hslToRgb(h, 0.95, if (dark) 0.68 else 0.38).let { Color(it[0], it[1], it[2]) } }
+        VettyBranchTree.branchPalette(rows.size, accent).map { h -> VettyBranchTree.hslToRgb(h, 0.95, if (dark) 0.68 else 0.38).let { Color(it[0], it[1], it[2]) } }
     }
     private val colorOf: Map<String, Color> = rows.withIndex().associate { it.value.name to palette[it.index] }   // stable per branch, not per filtered index
     private val hereColor = if (dark) Color.WHITE else Color.BLACK
-    private val baseColor = if (dark) Color(0, 200, 255) else VettyParse.hslToRgb(192.0, 1.0, 0.32).let { Color(it[0], it[1], it[2]) }
+    private val baseColor = if (dark) Color(0, 200, 255) else VettyBranchTree.hslToRgb(192.0, 1.0, 0.32).let { Color(it[0], it[1], it[2]) }
     private val dim = UIUtil.getContextHelpForeground()
     private val mono = EditorColorsManager.getInstance().globalScheme.getFont(EditorFontType.PLAIN)
     private val bold = EditorColorsManager.getInstance().globalScheme.getFont(EditorFontType.BOLD)
@@ -184,8 +184,8 @@ class VettyBasePicker(private val project: Project, private val rows: List<Vetty
             g.color = nodeColor
             g.drawString(r.name, x, ty); x += (fm.stringWidth(r.name) + JBUI.scale(10)).toFloat()
             fun chip(text: String, hue: Double) {
-                val bg = VettyParse.hslToRgb(hue, 0.85, if (dark) 0.17 else 0.88).let { Color(it[0], it[1], it[2]) }
-                val fg = VettyParse.hslToRgb(hue, 0.70, if (dark) 0.80 else 0.25).let { Color(it[0], it[1], it[2]) }
+                val bg = VettyBranchTree.hslToRgb(hue, 0.85, if (dark) 0.17 else 0.88).let { Color(it[0], it[1], it[2]) }
+                val fg = VettyBranchTree.hslToRgb(hue, 0.70, if (dark) 0.80 else 0.25).let { Color(it[0], it[1], it[2]) }
                 g.font = bold.deriveFont(bold.size2D * 0.85f)
                 val w = g.fontMetrics.stringWidth(text) + JBUI.scale(12); val h = JBUI.scale(16)
                 g.color = bg; g.fill(java.awt.geom.RoundRectangle2D.Float(x, cy - h / 2f, w.toFloat(), h.toFloat(), 6f, 6f))

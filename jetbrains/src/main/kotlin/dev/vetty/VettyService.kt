@@ -232,7 +232,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             ?.let { Regex("""@\{(\d+)\}""").find(it)?.groupValues?.get(1)?.toLongOrNull() }
             ?: Long.MAX_VALUE   // no reflog → can't claim parenthood
 
-    /** Tree parent (the terminal picker rule, see VettyParse.branchTree) → conventional local → most-recent
+    /** Tree parent (the terminal picker rule, see VettyBranchTree.branchTree) → conventional local → most-recent
      *  other local → current branch. Two git calls for every branch instead of one per branch, and the
      *  picker's BASE chip and the inferred base can't disagree (the old ahead/behind scan could root a
      *  stacked branch on develop). */
@@ -245,7 +245,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         return cur   // diff against self = uncommitted working changes only
     }
 
-    class BranchTreeData(val rows: List<VettyParse.BranchRow>, val worktrees: Map<String, String>)
+    class BranchTreeData(val rows: List<VettyBranchTree.BranchRow>, val worktrees: Map<String, String>)
 
     /** Every local branch as a tree + which branch is checked out in which other worktree. Two git
      *  calls plus one worktree list; reflog births only for same-tip ties. Feeds the picker and the base. */
@@ -256,20 +256,20 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
             listOf("log", "--branches", "--first-parent", "--format=%H %P", "-n", "4000"),
             listOf("worktree", "list", "--porcelain"),
         )) { git(*it.toTypedArray()) }
-        val rows = VettyParse.branchTree(VettyParse.parseBranchTips(outs[0]), VettyParse.parseFirstParents(outs[1]),
+        val rows = VettyBranchTree.branchTree(VettyBranchTree.parseBranchTips(outs[0]), VettyBranchTree.parseFirstParents(outs[1]),
             TRUNKS, { branchCreatedAt(it) }, PARENT_MAX_AHEAD)
-        return BranchTreeData(rows, VettyParse.parseWorktrees(outs[2], repoRoot() ?: ""))
+        return BranchTreeData(rows, VettyBranchTree.parseWorktrees(outs[2], repoRoot() ?: ""))
     }
 
     /** One picker row, bottom-up order (trunk at the foot). BASE = the base in use now. */
-    class PickRow(val name: String, val cells: List<VettyParse.GraphCell>, val noTrunk: Boolean, val current: Boolean,
+    class PickRow(val name: String, val cells: List<VettyBranchTree.GraphCell>, val noTrunk: Boolean, val current: Boolean,
                   val base: Boolean, val trunk: Boolean, val worktree: String)
 
     fun basePickerRows(): List<PickRow> {
         val cur = currentBranch()
         val tree = branchTreeData()
         val rows = tree.rows.reversed()
-        val g = VettyParse.layoutBranchGraph(rows, cur, TRUNKS)
+        val g = VettyBranchTree.layoutBranchGraph(rows, cur, TRUNKS)
         val using = base()
         return rows.mapIndexed { i, r ->
             PickRow(r.name, g.cells[i], noTrunk = g.lines[i].any { it == '◇' || it == '◈' } && r.parent.isEmpty(),
@@ -365,7 +365,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         val behind = guidedBehind
         return listOf(
             " · guided",
-            VettyParse.ago(review.writtenAt),
+            VettyReviewFile.ago(review.writtenAt),
             if (behind != null && behind > 0) "$behind commit${if (behind == 1) "" else "s"} behind" else "",
             if (missing > 0) "$missing unannotated" else "",
         ).filter { it.isNotEmpty() }.joinToString(" · ")
@@ -427,15 +427,15 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
     @Volatile private var prefixCache: String = ""      // repo-root → project-relative (--show-prefix)
     private fun claudeFile(): java.io.File? = gitDirCache?.let { java.io.File(it, "vetty/claude-review.json") }
     private var claudeKey: String? = null
-    private var claudeVal: VettyParse.ClaudeReview? = null
+    private var claudeVal: VettyReviewFile.ClaudeReview? = null
 
     /** Parsed review for the current branch (re-read only when the file or branch changes). */
-    @Synchronized fun claudeReview(): VettyParse.ClaudeReview? {
+    @Synchronized fun claudeReview(): VettyReviewFile.ClaudeReview? {
         val f = claudeFile()
         val key = if (f != null && f.isFile) "${f.lastModified()}:${f.length()}:$curBranch" else null
         if (key != claudeKey) {
             claudeVal = if (key == null) null
-                else try { VettyParse.parseClaudeReview(f!!.readText(), curBranch, prefixCache) } catch (e: Exception) { null }
+                else try { VettyReviewFile.parseClaudeReview(f!!.readText(), curBranch, prefixCache) } catch (e: Exception) { null }
             claudeKey = key
         }
         return claudeVal
@@ -454,7 +454,7 @@ class VettyService(private val project: Project, private val cs: CoroutineScope)
         local.forEach { deleteComment(it) }
         val f = claudeFile()
         if (ai.isEmpty() || f == null) return
-        try { f.writeText(VettyParse.removeClaudeComments(f.readText(), ai, prefixCache)) }
+        try { f.writeText(VettyReviewFile.removeClaudeComments(f.readText(), ai, prefixCache)) }
         catch (e: Exception) { com.intellij.openapi.diagnostic.Logger.getInstance("#dev.vetty").warn("could not update ${f.path}", e) }
     }
 

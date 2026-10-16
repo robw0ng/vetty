@@ -60,31 +60,31 @@ class VettyParseTest {
         val text = """{"branch":"feat","order":["sub/a.kt",{"file":"sub/b.kt","note":"callers"},"sub/a.kt","other/x.kt"],
             "comments":[{"file":"sub/a.kt","line":3,"endLine":5,"anchor":" val x = 1 ","body":"- why"},
                         {"file":"sub/a.kt","line":0,"body":"bad"}]}"""
-        assertEquals(null, VettyParse.parseClaudeReview(text, "other", "sub/"))
-        val r = VettyParse.parseClaudeReview(text, "feat", "sub/")!!
+        assertEquals(null, VettyReviewFile.parseClaudeReview(text, "other", "sub/"))
+        val r = VettyReviewFile.parseClaudeReview(text, "feat", "sub/")!!
         assertEquals(mapOf("a.kt" to (0 to ""), "b.kt" to (1 to "callers")), r.order)   // other/ is outside the project
         assertEquals(1, r.comments.size)
         val c = r.comments[0]
         assertEquals(listOf("a.kt", 2, 2, "val x = 1", true), listOf(c.file, c.line, c.span, c.anchor, c.ai))
-        val left = VettyParse.parseClaudeReview(VettyParse.removeClaudeComments(text, r.comments, "sub/"), "feat", "sub/")!!
+        val left = VettyReviewFile.parseClaudeReview(VettyReviewFile.removeClaudeComments(text, r.comments, "sub/"), "feat", "sub/")!!
         assertEquals(0, left.comments.size)
     }
 
     // Branch tree (terminal picker port): main ← feat-a ← {feat-b, feat-c}; orphan has no history.
     @Test fun branchTree_parentsAndGraph() {
-        val tips = VettyParse.parseBranchTips("b1 feat-b\nc1 feat-c\na1 feat-a\nm1 main\no1 orphan\n")
-        val fp = VettyParse.parseFirstParents("b1 a1\nc1 a1\na1 m1\nm1\no1\n")
-        val rows = VettyParse.branchTree(tips, fp, listOf("main"), { 0L })
+        val tips = VettyBranchTree.parseBranchTips("b1 feat-b\nc1 feat-c\na1 feat-a\nm1 main\no1 orphan\n")
+        val fp = VettyBranchTree.parseFirstParents("b1 a1\nc1 a1\na1 m1\nm1\no1\n")
+        val rows = VettyBranchTree.branchTree(tips, fp, listOf("main"), { 0L })
         assertEquals(listOf("orphan<", "main<", "feat-a<main", "feat-b<feat-a", "feat-c<feat-a"), rows.map { "${it.name}<${it.parent}" })
-        val g = VettyParse.layoutBranchGraph(rows.reversed(), "main", listOf("main"))
+        val g = VettyBranchTree.layoutBranchGraph(rows.reversed(), "main", listOf("main"))
         assertEquals(listOf("◯   ", "│ ◯ ", "◯─┘ ", "◉   ", "◇   "), g.lines)
         val join = g.cells[2]   // feat-a: node heading down to main, lane 1 joins from the right
         assertEquals(true, join[0].node == '◯' && join[0].down && join[0].right && join[2].up && join[2].left && !join[2].right)
         // Same-tip tie: the OLDER branch is the parent.
-        val t2 = VettyParse.parseBranchTips("x1 child\nx1 parent\nm1 main\n")
-        val r2 = VettyParse.branchTree(t2, VettyParse.parseFirstParents("x1 m1\nm1\n"), listOf("main"), { mapOf("parent" to 1L, "child" to 2L, "main" to 0L)[it]!! })
+        val t2 = VettyBranchTree.parseBranchTips("x1 child\nx1 parent\nm1 main\n")
+        val r2 = VettyBranchTree.branchTree(t2, VettyBranchTree.parseFirstParents("x1 m1\nm1\n"), listOf("main"), { mapOf("parent" to 1L, "child" to 2L, "main" to 0L)[it]!! })
         assertEquals("parent", r2.first { it.name == "child" }.parent)
-        assertEquals(mapOf("y" to "core"), VettyParse.parseWorktrees("worktree C:/core\nHEAD aa\nbranch refs/heads/x\n\nworktree C:/worktrees/US-1/core\nHEAD bb\nbranch refs/heads/y\n", "C:\\core"))
+        assertEquals(mapOf("y" to "core"), VettyBranchTree.parseWorktrees("worktree C:/core\nHEAD aa\nbranch refs/heads/x\n\nworktree C:/worktrees/US-1/core\nHEAD bb\nbranch refs/heads/y\n", "C:\\core"))
     }
 
     @Test fun exportComments_formatsFileLineBody() {

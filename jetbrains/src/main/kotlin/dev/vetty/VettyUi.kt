@@ -1408,7 +1408,7 @@ private class VettyGutterIcon(private val project: Project, val c: VettyStateSer
     override fun getIcon() = if (c.ai) AllIcons.Actions.IntentionBulb else AllIcons.General.Balloon
     // Claude notes are markdown (bullets, tables): monospace keeps table columns aligned.
     override fun getTooltipText() = if (!c.ai) c.body
-        else "<html><b>Claude${if (c.big) " · big picture" else ""}</b>${VettyParse.mdToHtml(c.body)}</html>"
+        else "<html><b>Claude${if (c.big) " · big picture" else ""}</b>${VettyReviewFile.mdToHtml(c.body)}</html>"
     override fun isNavigateAction() = true
     override fun getClickAction(): AnAction = object : AnAction() {
         override fun actionPerformed(e: AnActionEvent) {
