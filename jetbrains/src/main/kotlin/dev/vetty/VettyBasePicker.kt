@@ -38,8 +38,8 @@ import javax.swing.event.DocumentListener
  * other worktrees; one palette colour per branch. Type to filter, ↑↓ Enter Esc, hover moves the
  * cursor, click picks. Mirrors src/branchpick.js.
  */
-class VettyBasePicker(private val project: Project, private val rows: List<VettyService.PickRow>, private val onPick: (String) -> Unit) {
-    private val model = DefaultListModel<VettyService.PickRow>()
+class VettyBasePicker(private val project: Project, private val rows: List<PickRow>, private val onPick: (String) -> Unit) {
+    private val model = DefaultListModel<PickRow>()
     private val list = JBList(model)
     private val filter = JBTextField()
     private val hint = JLabel()
@@ -135,14 +135,14 @@ class VettyBasePicker(private val project: Project, private val rows: List<Vetty
     }
 
     /** One row: lanes painted edge to edge (so verticals join across rows), then name, chips, tags. */
-    private inner class Renderer : JPanel(), ListCellRenderer<VettyService.PickRow> {
-        private var row: VettyService.PickRow? = null
+    private inner class Renderer : JPanel(), ListCellRenderer<PickRow> {
+        private var row: PickRow? = null
         private var index = 0
         private var selected = false
         private val W = JBUI.scale(9); private val H = JBUI.scale(22); private val R = JBUI.scale(4).toFloat() + 0.5f
         private val width = rows.maxOfOrNull { it.cells.size } ?: 1
         init { isOpaque = true; preferredSize = Dimension(0, H) }
-        override fun getListCellRendererComponent(l: JList<out VettyService.PickRow>, v: VettyService.PickRow, i: Int, sel: Boolean, focus: Boolean): Component {
+        override fun getListCellRendererComponent(l: JList<out PickRow>, v: PickRow, i: Int, sel: Boolean, focus: Boolean): Component {
             row = v; index = i; selected = sel
             background = if (sel) UIUtil.getListSelectionBackground(true) else UIUtil.getListBackground()
             return this

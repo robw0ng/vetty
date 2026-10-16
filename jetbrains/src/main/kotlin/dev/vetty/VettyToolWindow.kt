@@ -1039,7 +1039,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
         }
     }
 
-    private fun showBasePopup(items: List<VettyService.BranchItem>, curBase: String?, under: java.awt.Component?) {
+    private fun showBasePopup(items: List<BranchItem>, curBase: String?, under: java.awt.Component?) {
         if (items.isEmpty()) return
         val group = DefaultActionGroup()
         for (bi in items) {
