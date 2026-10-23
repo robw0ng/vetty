@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.115
+
+- **Fix (VS Code):** the PR-mode toggle's first click did nothing (it read the setting with the
+  wrong default). Git errors while loading the Review tree now show once as an error message
+  instead of silently emptying the tree. The "pick a branch first" message names the real command
+  (Vetty: Change Base Branch). The TODO scan reuses the untracked-file list from the same refresh
+  instead of running `git ls-files` again.
+- **Tidy:** removed an unused Rider helper and a stale comment about how marks are keyed.
+
 ## 0.0.113 – 0.0.114
 
 - **Comments: per-file actions.** Each file row in the Comments panel can copy or delete all of

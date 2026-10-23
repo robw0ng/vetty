@@ -263,8 +263,13 @@ class DiffTree {
             await setViewed(this.context, this.base, viewed);
           }
         }
-      } catch {
-        // leave empty
+        this.untracked = untracked; // shared with the TODO scan (same refresh) — saves a `git ls-files`
+        this._lastErr = null;
+      } catch (e) {
+        // Empty tree + a visible reason, once per distinct error (refreshes fire every ~400ms).
+        const msg = String(e?.message || e).split('\n')[0];
+        if (msg !== this._lastErr) vscode.window.showErrorMessage(`Vetty: ${msg}`);
+        this._lastErr = msg;
       }
     }
     this.files = files;

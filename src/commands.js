@@ -33,9 +33,7 @@ async function pickFolder(context) {
   if (!pick) return;
   await context.workspaceState.update(FOLDER_KEY, pick.fsPath);
   await resolveRepoRoot();
-  // ponytail: viewed/ignored/groups keys are per-base-NAME, not per-repo — two repos sharing a
-  // branch name share marks. Key by repo root if that ever bites.
-  hashCache.clear();
+  hashCache.clear(); // keyed by bare rel — another folder's same-named file must not hit it (marks themselves are keyed by repo path + branch)
   watchGitDir(context, app.bumpReload);
   await detectGh(getCwd());
   await app.diffTree.load();
@@ -189,7 +187,7 @@ async function applyViewed(context, makeViewed) {
   if (!cwd) return;
   const base = lastBranch(context);
   if (!base) {
-    vscode.window.showInformationMessage('Pick a branch first via "db: Open All Files Changed vs Branch".');
+    vscode.window.showInformationMessage('Pick a base branch first via "Vetty: Change Base Branch".');
     return;
   }
   const rel = activeRelPath(cwd);

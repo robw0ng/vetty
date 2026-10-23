@@ -74,9 +74,6 @@ fun VettyService.isViewed(rel: String): Boolean {
 internal fun VettyService.reviewedBlob(rel: String): String? =
     state.viewed[key(rel)]?.substringAfter('\t', "")?.ifEmpty { null }
 
-/** True when [rel] has a usable since-last-review snapshot (overlay on + blob present + changed since). */
-fun VettyService.hasSinceReviewDiff(rel: String): Boolean = sinceReview() && reviewedBlob(rel) != null && !isViewed(rel)
-
 /** True when [rel] has a last-viewed snapshot blob (gates the Revert-to-Last-Viewed button). */
 fun VettyService.hasSnapshot(rel: String): Boolean = reviewedBlob(rel) != null
 

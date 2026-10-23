@@ -127,7 +127,7 @@ function updatePrTitle(context) {
 /** Flip the PR-mode setting (the config listener handles cleanup if a review is active). */
 async function togglePrMode() {
   const cfg = vscode.workspace.getConfiguration('vetty');
-  const next = !cfg.get('pullRequests.enabled', true);
+  const next = !prEnabled(); // same default as the setting (false) — a hardcoded `true` made the first toggle a no-op
   await cfg.update('pullRequests.enabled', next, vscode.ConfigurationTarget.Global);
   vscode.window.setStatusBarMessage(`PR mode ${next ? 'enabled' : 'disabled'}`, 2500);
 }

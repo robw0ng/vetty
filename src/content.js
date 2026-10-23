@@ -118,8 +118,9 @@ async function untrackedFiles(cwd) {
   }
 }
 
-/** TODO/FIXME markers on added diff lines vs `ref` + every line of untracked files. */
-async function findTodos(cwd, ref) {
+/** TODO/FIXME markers on added diff lines vs `ref` + every line of untracked files.
+ *  `untracked` = the list DiffTree.load() already fetched this refresh (else fetched here). */
+async function findTodos(cwd, ref, untracked) {
   let out = '';
   try {
     out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
@@ -127,7 +128,7 @@ async function findTodos(cwd, ref) {
     return [];
   }
   const todos = parseTodoHunks(out, TODO_RE); // { rel, line, text }[]
-  for (const u of await untrackedFiles(cwd)) {
+  for (const u of untracked ?? (await untrackedFiles(cwd))) {
     try {
       const p = path.join(cwd, u);
       if (fs.statSync(p).size > 1024 * 1024) continue; // huge file — not review material, skip the read
