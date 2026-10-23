@@ -438,7 +438,7 @@ class DiffTree {
       const ig = shown.filter((f) => ignored.has(f));
       return [
         this._group(`Unviewed (${unv.length}) · vs ${shortRef(this.base)}`, unv, true, false, 'group-unviewed', `vs ${this.base}`),
-        this._group(`Viewed (${vw.length})`, vw, true, false, 'group-viewed'),
+        this._group(`Viewed (${vw.length})`, vw, false, false, 'group-viewed'), // starts collapsed; VS Code keeps your toggle,
         this._group(`Ignored (${ig.length})`, ig, false, true, 'group-ignored'),
       ];
     }

@@ -73,7 +73,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private val commentHeader = sectionHeader()
     private val searchHeader = sectionHeader()
     private lateinit var searchPanel: JPanel
-    private var searchCollapsed = false
+    private var searchCollapsed = true   // starts minimized
     private val reviewScroll = JBScrollPane(tree)
     private val todoScroll = JBScrollPane(todoTree)
     private val commentScroll = JBScrollPane(commentTree)
@@ -86,7 +86,7 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
     private var todoCount = 0
     private var commentCount = 0
     // Explicit per-group expand state (robust to empty groups, unlike reading it back off the tree).
-    private val groupExpanded = mutableMapOf(Group.UNVIEWED to true, Group.VIEWED to true, Group.UNTRACKED to false)
+    private val groupExpanded = mutableMapOf(Group.UNVIEWED to true, Group.VIEWED to false, Group.UNTRACKED to false)
     private val collapsedFolders = HashSet<String>()  // folder paths the user collapsed (folders default expanded)
     private var current: List<VFile> = emptyList()    // the SHOWN slice (post-filter) — nav/advance stay within it
     private var allFiles: List<VFile> = emptyList()   // the full changed set from the last load
@@ -496,6 +496,12 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                     if (rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) copyComments(s.items)
                     return
                 }
+                // File header's Copy icon → copy that file's comments. Delete is right-click only (no accidental wipes).
+                ((p.lastPathComponent as? DefaultMutableTreeNode)?.takeIf { it.userObject is FileHeader })?.let { fn ->
+                    val rb = commentTree.getPathBounds(p)
+                    if (rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) copyComments(fileComments(fn))
+                    return
+                }
                 val c = (p.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? VettyStateService.Comment ?: return
                 // Inline row button hit? (Copy / Delete icons sit at the left, before the text)
                 val rb = commentTree.getPathBounds(p)
@@ -519,6 +525,9 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                     if (obj is SectionNode && rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) {
                         hand = true
                         tip = "Copy all ${obj.title.lowercase()}"
+                    } else if (obj is FileHeader && rb != null && e.x >= rb.x && e.x < rb.x + ROW_ICON) {
+                        hand = true
+                        tip = "Copy this file's comments"
                     } else if (c != null && rb != null && e.x >= rb.x && e.x < rb.x + 2 * ROW_ICON) {
                         hand = true
                         tip = commentActions(c)[((e.x - rb.x) / ROW_ICON).coerceIn(0, 1)].second
@@ -667,6 +676,10 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
             com.intellij.openapi.ui.popup.JBPopupFactory.ActionSelectionAid.MNEMONICS, true
         ).show(com.intellij.ui.awt.RelativePoint(e))
     }
+
+    /** The comments directly under a file header row in the Comments pane. */
+    private fun fileComments(n: DefaultMutableTreeNode): List<VettyStateService.Comment> =
+        (0 until n.childCount).mapNotNull { (n.getChildAt(it) as DefaultMutableTreeNode).userObject as? VettyStateService.Comment }
 
     private fun selectedComments(): List<VettyStateService.Comment> {
         // A file header (or a whole section) stands for everything under it.
@@ -1202,6 +1215,8 @@ class VettyPanel(private val project: Project) : SimpleToolWindowPanel(true, tru
                 is VFile -> fileActions(obj)
                 is VettyStateService.Comment -> commentActions(obj)
                 is SectionNode -> listOf(Triple(AllIcons.Actions.Copy, "Copy all") { copyComments(obj.items) })
+                is FileHeader -> fileComments(value as DefaultMutableTreeNode).takeIf { it.isNotEmpty() }
+                    ?.let { cs -> listOf(Triple(AllIcons.Actions.Copy, "Copy ${cs.size}") { copyComments(cs) }) } ?: return comp
                 is Todo -> todoActions(obj)
                 else -> return comp
             }

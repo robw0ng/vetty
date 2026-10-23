@@ -2,7 +2,7 @@
   "name": "vetty",
   "displayName": "Vetty",
   "description": "Vet code you didn't write — local code review for VS Code.",
-  "version": "0.0.112",
+  "version": "0.0.114",
   "publisher": "local",
   "license": "MIT",
   "author": "robw0ng",
@@ -323,6 +323,11 @@
         "icon": "$(trash)"
       },
       {
+        "command": "vetty.commentFileMenu",
+        "title": "More Actions...",
+        "icon": "$(ellipsis)"
+      },
+      {
         "command": "vetty.copyPaths",
         "title": "Copy Path(s)"
       },
@@ -474,7 +479,8 @@
         {
           "type": "webview",
           "id": "vettySearch",
-          "name": "Search"
+          "name": "Search",
+          "visibility": "collapsed"
         },
         {
           "id": "vettyView",
@@ -760,7 +766,7 @@
         },
         {
           "command": "vetty.commentCopy",
-          "when": "view == vettyComments && viewItem =~ /^vetty(Pr|Ai)?Comment$/",
+          "when": "view == vettyComments && viewItem =~ /^(vetty(Pr|Ai)?Comment|(comment|guided)File)$/",
           "group": "1_comment@2"
         },
         {
@@ -780,12 +786,17 @@
         },
         {
           "command": "vetty.commentDelete",
-          "when": "view == vettyComments && viewItem =~ /^vetty(Pr|Ai)?Comment$/",
+          "when": "view == vettyComments && viewItem =~ /^(vetty(Pr|Ai)?Comment|(comment|guided)File)$/",
           "group": "1_comment@3"
         },
         {
           "command": "vetty.commentCopy",
           "when": "view == vettyComments && viewItem =~ /^vetty(Pr|Ai)?Comment$/",
+          "group": "inline@0"
+        },
+        {
+          "command": "vetty.commentFileMenu",
+          "when": "view == vettyComments && viewItem =~ /^(comment|guided)File$/",
           "group": "inline@0"
         },
         {
@@ -898,6 +909,10 @@
         },
         {
           "command": "vetty.commentCopy",
+          "when": "false"
+        },
+        {
+          "command": "vetty.commentFileMenu",
           "when": "false"
         },
         {

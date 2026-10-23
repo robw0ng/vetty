@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.0.113 – 0.0.114
+
+- **Comments: per-file actions.** Each file row in the Comments panel can copy or delete all of
+  that file's comments. VS Code: a hover `⋯` opens Copy / Delete (two clicks, so Delete can't be
+  hit by accident); right-click offers the same. Rider: hover Copy icon, Delete via right-click.
+  Guided-review notes are untouched by Clear All / Export, same as before.
+- **Search and Viewed start folded** in both editors. VS Code remembers your toggle afterwards;
+  Rider resets to folded on each IDE start.
+
 ## 0.0.112
 
 - **Fix (VS Code):** `*` / `^` stage markers update right after View/Unview, Stage/Unstage and

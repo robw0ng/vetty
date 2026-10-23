@@ -180,10 +180,23 @@ async function commentCopy(context, item, sel) {
   vscode.window.setStatusBarMessage(`Copied ${lines.length + aiBlocks.length} comment(s)`, 2000);
 }
 
+/** File header ⋯: a two-click menu so Delete (whole file) can't be hit by accident. Right-click offers the same. */
+async function commentFileMenu(context, item) {
+  const n = (item?.entries || []).length;
+  const pick = await vscode.window.showQuickPick(
+    [
+      { label: '$(copy) Copy', description: `${n} comment(s)`, act: commentCopy },
+      { label: '$(trash) Delete', description: `${n} comment(s)`, act: commentDelete },
+    ],
+    { placeHolder: item?.label }
+  );
+  if (pick) await pick.act(context, item, null);
+}
+
 /** Section header Copy: everything under "Comments" or "Guided review" (section → file groups → rows). */
 async function copySection(context, section) {
   const rows = (section?.entries || []).flatMap((g) => g.entries || []);
   if (rows.length) await commentCopy(context, null, rows);
 }
 
-module.exports = { CommentsTree, commentGoTo, commentOpen, commentDelete, commentEdit, commentCopy, copySection };
+module.exports = { CommentsTree, commentGoTo, commentOpen, commentDelete, commentEdit, commentCopy, copySection, commentFileMenu };

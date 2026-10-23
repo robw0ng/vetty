@@ -41,6 +41,7 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.commentEdit', (item) => commentsView.commentEdit(context, item)),
     vscode.commands.registerCommand('vetty.commentCopy', (item, sel) => commentsView.commentCopy(context, item, sel)),
     vscode.commands.registerCommand('vetty.copySection', (item) => commentsView.copySection(context, item)),
+    vscode.commands.registerCommand('vetty.commentFileMenu', (item) => commentsView.commentFileMenu(context, item)),
     vscode.commands.registerCommand('vetty.commentDelete', (item, sel) => commentsView.commentDelete(context, item, sel)),
     vscode.commands.registerCommand('vetty.openTodo', (rel, line) => todos.openTodo(rel, line)),
     vscode.commands.registerCommand('vetty.copyTodos', () => todos.copyTodos()),
