@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.116
+
+- **Fix (VS Code):** "reviewedBlob is not defined" when the Review tree rendered a file edited
+  since it was viewed. The import was lost in the module split; 0.0.115's error reporting made it
+  visible. Every source file was checked for other undefined names (none).
+
 ## 0.0.115
 
 - **Fix (VS Code):** the PR-mode toggle's first click did nothing (it read the setting with the

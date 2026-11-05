@@ -7,7 +7,7 @@ const { parseNumstat, ago } = require('../lib');
 const core = require('./core');
 const {
   app, getCwd, git, untrackedFiles, getViewed, setViewed, viewedEntries, getIgnored, getGroups, setGroups, isViewed,
-  resolveBase, mergeBaseRef, lastBranch, shortRef, DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff,
+  resolveBase, mergeBaseRef, lastBranch, shortRef, DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff, reviewedBlob,
 } = core;
 
 const PAGE_SIZE = 500; // flat-view rows per group before a "Show more" row appears
