@@ -162,6 +162,7 @@ class VettyService(internal val project: Project, internal val cs: CoroutineScop
 
     /** Branch range: files changed vs HEAD but not vs the merge-base (committed, then undone). Set by load(). */
     @Volatile internal var wtOnlySet: Set<String> = emptySet()
+    private val healDenied: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()   // "rel\nsnapshot\nHEAD" judged a real edit
 
     /** Full changed-file model, grouped Unviewed / Viewed / Untracked(= user-marked noise). */
     fun load(): List<VFile> {
@@ -216,10 +217,19 @@ class VettyService(internal val project: Project, internal val cs: CoroutineScop
             // Commit self-heal: format-on-commit hooks (lint-staged etc.) rewrite reviewed files during
             // the commit, so their hash-bound marks go stale even though the new content is exactly what
             // got committed. Commit ⊇ staging ⇒ view: a file that ALREADY holds a mark and is now clean
-            // vs HEAD re-heals instead of dropping to Unviewed. Never creates marks.
-            for ((status, rel) in nameStatus)
-                if (status != "D" && rel !in stagedSet && rel !in dirtySet &&
-                    state.viewed.containsKey(key(rel)) && !isViewed(rel) && !isIgnored(rel)) markViewed(rel)
+            // vs HEAD re-heals instead of dropping to Unviewed — but only when HEAD differs from the
+            // reviewed snapshot by whitespace alone; real edits committed after the review (from a
+            // terminal, by an agent) stay Unviewed. Never creates marks.
+            val candidates = nameStatus.filter { (status, rel) ->
+                status != "D" && rel !in stagedSet && rel !in dirtySet &&
+                    state.viewed.containsKey(key(rel)) && !isViewed(rel) && !isIgnored(rel)
+            }.map { it.second }
+            val head = if (candidates.isEmpty()) "" else git("rev-parse", "HEAD").trim()
+            for (rel in candidates) {
+                val k = "$rel\n${reviewedBlob(rel)}\n$head"
+                if (k in healDenied) continue
+                if (whitespaceOnlyChange(rel)) markViewed(rel) else healDenied.add(k)
+            }
         }
         val files = ArrayList<VFile>()
         val seen = HashSet<String>()

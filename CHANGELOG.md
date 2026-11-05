@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.0.117
+
+- **Fix (both editors, stage-on-view):** files edited and committed after you viewed them (e.g. by
+  a teammate or an agent in a terminal) stayed Viewed. The commit self-heal (meant for
+  format-on-commit hooks rewriting a reviewed file) re-marked any marked file that was clean vs
+  HEAD. It now heals only when the committed content differs from your reviewed snapshot by
+  whitespace alone; anything else drops to Unviewed with the ↻ badge, and the since-review diff
+  shows exactly what changed. A hook that rewrites more than whitespace (quotes, wrapping) now
+  shows that file as Unviewed once instead of silently keeping it Viewed.
+
 ## 0.0.116
 
 - **Fix (VS Code):** "reviewedBlob is not defined" when the Review tree rendered a file edited

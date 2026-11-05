@@ -74,6 +74,15 @@ fun VettyService.isViewed(rel: String): Boolean {
 internal fun VettyService.reviewedBlob(rel: String): String? =
     state.viewed[key(rel)]?.substringAfter('\t', "")?.ifEmpty { null }
 
+/** True when [rel]'s committed content differs from the reviewed snapshot only by whitespace: what a
+ *  format-on-commit hook does. A real edit, no snapshot or a git error → false (never mark unreviewed
+ *  content viewed). `:./` resolves relative to the git working dir, like the --relative diffs. */
+internal fun VettyService.whitespaceOnlyChange(rel: String): Boolean {
+    val blob = reviewedBlob(rel) ?: return false
+    // -b, not -w: -w also equates `foobar` with `foo bar` and ignores indentation that IS structure (Python).
+    return git.exitCode("diff", "-b", "--ignore-blank-lines", "--quiet", blob, "HEAD:./$rel") == 0
+}
+
 /** True when [rel] has a last-viewed snapshot blob (gates the Revert-to-Last-Viewed button). */
 fun VettyService.hasSnapshot(rel: String): Boolean = reviewedBlob(rel) != null
 

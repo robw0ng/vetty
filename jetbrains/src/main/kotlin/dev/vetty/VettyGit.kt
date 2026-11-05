@@ -24,6 +24,12 @@ internal class VettyGit(private val root: () -> String?) {
         }
     }
 
+    /** Exit code of `git args` (-1 when it can't run) — for `--quiet` / `--exit-code` style questions. */
+    fun exitCode(vararg args: String): Int {
+        val p = start(args) ?: return -1
+        return try { p.inputStream.readBytes(); p.waitFor() } catch (e: Exception) { -1 }
+    }
+
     /** Run git feeding [input] on stdin (hash-object --stdin). */
     fun withInput(input: ByteArray, vararg args: String): String {
         val p = start(args) ?: return ""

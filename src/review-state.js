@@ -210,6 +210,21 @@ function groupNames(map) {
   return [...new Set(Object.values(map))];
 }
 
+/** True when `rel`'s committed content differs from the reviewed snapshot `blob` only by whitespace:
+ *  what a format-on-commit hook does to a reviewed file. A real edit, a missing snapshot or a git
+ *  error → false (never mark unreviewed content viewed). */
+async function whitespaceOnlyChange(cwd, rel, blob) {
+  if (!blob) return false;
+  try {
+    // -b --numstat emits no row when nothing but whitespace changed (same trick as hide-whitespace).
+    // -b, not -w: -w also equates `foobar` with `foo bar` and ignores indentation that IS structure (Python).
+    const out = await git(cwd, ['diff', '-b', '--ignore-blank-lines', '--numstat', blob, `HEAD:./${rel}`]);
+    return out.trim() === '';
+  } catch {
+    return false;
+  }
+}
+
 /** Opt-in (vetty.stageOnView): marking a file viewed also stages its current content — reviewed ⇒
  *  staged. Files with open comments are skipped: a comment means "changes requested", so the file
  *  is reviewed but not approved (staged = viewed ∧ no open comments). Best-effort; never blocks
@@ -245,7 +260,7 @@ async function unstageOnUnview(cwd, rels) {
 module.exports = {
   hashCache, fileHash, fileHashRaw,
   activeBranchName, setActiveBranch, stateScope, stateCache,
-  getViewed, setViewed, viewedHash, reviewedBlob, isViewed, viewedEntry, viewedEntries,
+  getViewed, setViewed, viewedHash, reviewedBlob, isViewed, viewedEntry, viewedEntries, whitespaceOnlyChange,
   getIgnored, setIgnored, ignoredByPattern, resetIgnorePatterns,
   getGroups, setGroups, groupNames,
   stageOnView, unstageOnUnview,

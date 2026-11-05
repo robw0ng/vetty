@@ -8,6 +8,7 @@ const core = require('./core');
 const {
   app, getCwd, git, untrackedFiles, getViewed, setViewed, viewedEntries, getIgnored, getGroups, setGroups, isViewed,
   resolveBase, mergeBaseRef, lastBranch, shortRef, DIFF_RANGE_SHORT, diffRange, sinceReviewOn, hasSinceReviewDiff, reviewedBlob,
+  whitespaceOnlyChange,
 } = core;
 
 const PAGE_SIZE = 500; // flat-view rows per group before a "Show more" row appears
@@ -77,6 +78,7 @@ class DiffTree {
     this.onDidChangeTreeData = this._emitter.event;
     this.base = lastBranch(context);
     this.files = [];
+    this._healDenied = new Set(); // `rel\nsnapshot\nHEAD` already judged a real edit — no re-check per refresh
     this.added = new Set(); // files absent from base — diff left side would be empty, so open them as files
     this.status = new Map(); // rel → status letter (A/M/R/C/T) for the file decoration badge
     this.stat = new Map(); // rel → { add, del } line counts from --numstat
@@ -252,11 +254,22 @@ class DiffTree {
           // Commit self-heal: format-on-commit hooks (lint-staged etc.) rewrite reviewed files
           // during the commit, so their hash-bound marks go stale even though the new content is
           // exactly what got committed. Commit ⊇ staging ⇒ view: a file that ALREADY holds a mark
-          // and is now clean vs HEAD re-heals instead of dropping to Unviewed. Never creates marks.
-          const healed = files.filter(
+          // and is now clean vs HEAD re-heals instead of dropping to Unviewed — but only when HEAD
+          // differs from the reviewed snapshot by whitespace alone. Real edits committed after the
+          // review (from a terminal, by an agent) stay Unviewed with ↻. Never creates marks.
+          const candidates = files.filter(
             (r) => viewed[r] !== undefined && !staged.has(r) && !dirty.has(r) && !deleted.has(r) &&
               !ignored.has(r) && !isViewed(cwd, viewed, r)
           );
+          const healed = [];
+          // Denied files stay candidates on every refresh: only re-ask git once HEAD has moved.
+          const head = candidates.length ? (await git(cwd, ['rev-parse', 'HEAD'])).trim() : '';
+          for (const r of candidates) {
+            const key = `${r}\n${reviewedBlob(viewed, r)}\n${head}`;
+            if (this._healDenied.has(key)) continue;
+            if (await whitespaceOnlyChange(cwd, r, reviewedBlob(viewed, r))) healed.push(r);
+            else this._healDenied.add(key);
+          }
           const marks = [...auto, ...healed];
           if (marks.length) {
             Object.assign(viewed, await viewedEntries(cwd, marks));
