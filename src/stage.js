@@ -2,7 +2,7 @@
 // or to its last-viewed snapshot, and the stage-on-view toggle.
 const vscode = require('vscode');
 const path = require('path');
-const { app, getCwd, git, gitAddChunked, gitBlobBytes, stageOnView, getViewed, isViewed, reviewedBlob } = require('./core');
+const { app, getCwd, git, gitAddChunked, gitBlobBytes, stageOnView, getViewed, isViewed, reviewedBlob, dbg } = require('./core');
 const { selectedRels } = require('./commands');
 
 /** Bridge review → SCM: git-add every file you've marked viewed, then commit in Source Control. */
@@ -119,7 +119,9 @@ async function revertToViewed(context, item, sel) {
     const out = await git(cwd, ['diff', '--cached', '--name-only', '--', ...withSnap]);
     const resync = out.split('\n').map((s) => s.trim()).filter(Boolean);
     if (resync.length) await gitAddChunked(cwd, resync);
-  } catch { /* best-effort */ }
+  } catch (e) {
+    dbg(`index resync after restore failed: ${e.message}`); // Source Control may show stale staged rows
+  }
   await stageOnView(context, cwd, withSnap);
   await app.diffTree.load();
 }

@@ -9,6 +9,8 @@ working tree — no PR required. Built for the rapid re-review loop that AI-assi
 when an agent rewrites 30 files, Vetty tells you what it touched, what you've checked, and
 what changed since your last pass.
 
+<!-- screenshot: the Review view with Unviewed / Viewed groups and a since-last-review diff open — add docs/vetty.png and reference it here -->
+
 ## Features
 
 | Feature                                                    | What it does                                                                                                | Why it helps                                   |
@@ -124,3 +126,20 @@ PR review is **experimental and off by default**. Turn on `vetty.pullRequests.en
 - Comments and viewed-state are local to your machine and stored per workspace.
 - PR review needs the GitHub CLI (`gh`); without it (or with `vetty.pullRequests.enabled: false`)
   Vetty runs fully local with no change to the rest of its features.
+
+## Development
+
+```sh
+npm test                                  # smoke test of the pure helpers (lib/) and the viewed-state logic
+npx @vscode/vsce package -o dist/x.vsix   # package the extension
+cd jetbrains && ./gradlew buildPlugin     # Rider plugin zip (JDK 17; the Gradle wrapper is committed)
+```
+
+Layout: `extension.js` wires VS Code up; `src/` holds the views and commands (`core.js` aggregates the
+git, state, base-branch and guided-review plumbing); `lib/` is pure, editor-free parsing shared with the
+tests; `jetbrains/` is the Kotlin port; `plugins/vetty/` is the Claude Code skill that writes the guided
+review. A `v*` tag builds both artifacts in CI and attaches them to a GitHub release.
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).

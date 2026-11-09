@@ -237,7 +237,7 @@ async function purgeOnMergeBaseChange(context, cwd, base, mergeBase) {
 }
 
 module.exports = {
-  LAST_BRANCH_KEY, MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,
+  MAX_REL_BRANCHES, TRUNK_NAMES, PARENT_MAX_AHEAD,
   currentBranch, localBranches, aheadBehind, branchCreatedAt, defaultBase, branchTreeData,
-  setBaseFor, lastBranch, inheritBranchState, resolveBase, pruneStaleState, purgeOnMergeBaseChange,
+  setBaseFor, lastBranch, resolveBase, pruneStaleState, purgeOnMergeBaseChange,
 };

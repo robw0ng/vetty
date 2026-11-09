@@ -18,8 +18,10 @@ internal class VettyGit(private val root: () -> String?) {
         return try {
             val out = ExecUtil.execAndGetOutput(cmd)
             VettyService.dbg { "git ${args.take(4).joinToString(" ")}${if (args.size > 4) " …" else ""} — ${System.currentTimeMillis() - t0}ms" }
-            if (out.exitCode == 0) out.stdout else ""
+            if (out.exitCode == 0) out.stdout
+            else { VettyService.dbg { "git ${args.take(4).joinToString(" ")} exit ${out.exitCode}: ${out.stderr.trim().take(200)}" }; "" }
         } catch (e: Exception) {
+            VettyService.dbg { "git ${args.take(4).joinToString(" ")} failed: ${e.message}" }
             ""
         }
     }
@@ -57,6 +59,6 @@ internal class VettyGit(private val root: () -> String?) {
                 .directory(java.io.File(dir))
                 .redirectError(ProcessBuilder.Redirect.DISCARD)
                 .start()
-        } catch (e: Exception) { null }
+        } catch (e: Exception) { VettyService.dbg { "git start failed: ${e.message}" }; null }
     }
 }

@@ -625,4 +625,4 @@ function fileGroups(cwd, pairs, kind) {
   });
 }
 
-module.exports = { DiffTree, fileDecorations, fileGroups, untrackedLineCount, PAGE_SIZE };
+module.exports = { DiffTree, fileDecorations, fileGroups, PAGE_SIZE };

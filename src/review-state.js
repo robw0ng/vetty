@@ -110,8 +110,8 @@ async function viewedEntry(cwd, rel) {
   let b = null;
   try {
     b = (await git(cwd, ['hash-object', '-w', '--', path.join(cwd, rel)])).trim() || null;
-  } catch {
-    // blob snapshot best-effort; viewed-ness still works via hash
+  } catch (e) {
+    dbg(`blob snapshot failed for ${rel}: ${e.message}`); // viewed-ness still works via hash; no since-review diff
   }
   return { h, b };
 }
@@ -135,7 +135,8 @@ async function viewedEntries(cwd, rels) {
           .split('\n')
       : [];
     if (blobs.length !== present.length) blobs = null;
-  } catch {
+  } catch (e) {
+    dbg(`bulk blob snapshot failed: ${e.message}`); // falls back to one hash-object per file below
     blobs = null;
   }
   if (blobs) {

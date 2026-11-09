@@ -2,7 +2,7 @@
 
 Three parts, each safe to rerun: the Claude plugin (the `vetty-review` skill), the VS Code extension,
 and the Rider plugin. An agent can follow this from "install https://github.com/robw0ng/vetty".
-Windows and macOS are both covered; the macOS steps are **untested on a real Mac** until Robert tries them.
+Windows and macOS are both covered; the macOS steps are **untested on a real Mac** so far.
 
 ## 1. Clone
 

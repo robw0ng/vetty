@@ -4,7 +4,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { app, refreshTree, getCwd, git, gh, ghAvailable, prEnabled, REVIEW_KEY, setBaseFor, updateViewedContext } = require('./core');
+const { app, refreshTree, getCwd, git, gh, ghAvailable, prEnabled, REVIEW_KEY, setBaseFor, updateViewedContext, dbg } = require('./core');
 const comments = require('./comments');
 
 let prCommentMap = new Map(); // rel → [{ id, line, body, author, resolved, diffHunk, outdated }]
@@ -49,8 +49,8 @@ async function fetchPrComments(cwd, repo, number) {
         resolved: !!t.isResolved, diffHunk: c.diffHunk || '', outdated: !!c.outdated,
       });
     }
-  } catch {
-    // no comments / API hiccup — leave empty
+  } catch (e) {
+    dbg(`PR comments fetch failed: ${e.message}`); // auth / rate limit / wrong repo — shows as "no comments"
   }
 }
 
@@ -311,6 +311,6 @@ async function submitReview(context) {
 }
 
 module.exports = {
-  prThreads, prDismissed, fetchPrComments, buildPrThreads, dismissPrThreads, clearPrThreads,
+  prThreads, dismissPrThreads, clearPrThreads,
   updatePrTitle, togglePrMode, reviewPr, finishReview, pullPrComments, submitReview,
 };

@@ -53,7 +53,8 @@ fun VettyService.claudeReview(): VettyReviewFile.ClaudeReview? = synchronized(th
     val key = if (f != null && f.isFile) "${f.lastModified()}:${f.length()}:$curBranch" else null
     if (key != claudeKey) {
         claudeVal = if (key == null) null
-            else try { VettyReviewFile.parseClaudeReview(f!!.readText(), curBranch, prefixCache) } catch (e: Exception) { null }
+            else try { VettyReviewFile.parseClaudeReview(f!!.readText(), curBranch, prefixCache) }
+                 catch (e: Exception) { VettyService.dbg { "claude-review.json unreadable: ${e.message}" }; null }
         claudeKey = key
     }
     return claudeVal

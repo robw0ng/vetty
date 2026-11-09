@@ -7,7 +7,7 @@ inline comments you can export back to an AI agent.
 
 Works in Rider and every other JetBrains IDE (depends only on the platform, not Java/.NET modules).
 
-## Features (v0.1)
+## Features
 
 - **Changed-files tool window** (right dock) — `git diff` vs the base branch + untracked files, with `+/-` counts, in collapsible Search / Review / TODOs / Comments sections.
 - **Auto base branch** — infers the branch's parent by walking first-parent history to the nearest branch tip (same rule as the terminal picker). **Change Base** opens the tree picker: trunk at the foot, stacks growing upward, you-are-here, cyan CURRENT BASE, `⌂` worktree markers; type to filter, ↑↓ Enter Esc.
@@ -29,11 +29,10 @@ Not ported (deliberately): PR review (`gh`) and file groups.
 
 ## Build & run
 
-Requires JDK 17. Gradle comes via the wrapper (or use the one bundled in Rider).
+Requires JDK 17. The Gradle wrapper is committed, so nothing else to install.
 
 ```bash
 cd jetbrains
-gradle wrapper            # one-time: generates gradlew + the wrapper jar (skip if you'll use the IDE's Gradle)
 ./gradlew buildPlugin     # produces build/distributions/vetty-rider-<version>.zip (version tracks ../package.json)
 ./gradlew runIde          # launch a sandbox IDE with the plugin
 ```

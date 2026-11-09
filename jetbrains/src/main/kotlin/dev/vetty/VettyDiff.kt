@@ -175,7 +175,7 @@ private fun VettyService.viewedToggle(rel: String): AnAction = object : ToggleAc
 fun VettyService.openDiffPinned(f: VFile) {
     val rel = f.rel
     ApplicationManager.getApplication().executeOnPooledThread {
-        val req = try { buildDiffRequest(rel) } catch (e: Exception) { return@executeOnPooledThread }
+        val req = try { buildDiffRequest(rel) } catch (e: Exception) { VettyService.dbg { "diff request failed for $rel: ${e.message}" }; return@executeOnPooledThread }
         ApplicationManager.getApplication().invokeLater {
             val chainFile = try {
                 ChainDiffVirtualFile(SimpleDiffRequestChain(listOf(req)), rel.substringAfterLast('/'))

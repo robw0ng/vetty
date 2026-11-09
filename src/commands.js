@@ -365,7 +365,7 @@ async function treeOpenUnviewed(context) {
 }
 
 module.exports = {
-  pickFolder, pickBranch, changedFiles, openFiles, openAll, openByViewed,
+  pickFolder, openFiles, openAll, openByViewed,
   applyViewed, clearViewed, selectedRels, copyPaths,
   treeOpenFile, treeOpenDiff, treeSetViewed, treeSetIgnored, fetchAndRefresh,
   treeMarkAllViewed, treeMarkAllUnviewed, treePickBranch, treeOpenUnviewed,

@@ -19,9 +19,6 @@ const builtDocs = new Set(); // uri.toString() already hydrated this session
 function controller() {
   return commentController;
 }
-function localThreads() {
-  return threads;
-}
 function getComments(context) {
   return context.workspaceState.get(commentsKey()) || {};
 }
@@ -298,6 +295,6 @@ function initComments(context) {
 }
 
 module.exports = {
-  controller, localThreads, getComments, bodyText, relocateLine,
+  controller, getComments, relocateLine,
   unviewOnCommentResolve, saveAndRebuild, onBranchChanged, initComments,
 };

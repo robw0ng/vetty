@@ -4,6 +4,7 @@ const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
 const { TODO_RE, parseTodoHunks } = require('../lib');
+const { dbg } = require('./app');
 const { getCwd, git } = require('./git');
 const { getViewed, isViewed, reviewedBlob } = require('./review-state');
 const { lastBranch } = require('./base');
@@ -113,7 +114,8 @@ async function untrackedFiles(cwd) {
       .split('\n')
       .map((s) => s.trim())
       .filter(Boolean);
-  } catch {
+  } catch (e) {
+    dbg(`ls-files failed: ${e.message}`); // untracked files drop out of the tree until the next refresh
     return [];
   }
 }
@@ -124,7 +126,8 @@ async function findTodos(cwd, ref, untracked) {
   let out = '';
   try {
     out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
-  } catch {
+  } catch (e) {
+    dbg(`todo scan failed: ${e.message}`);
     return [];
   }
   const todos = parseTodoHunks(out, TODO_RE); // { rel, line, text }[]

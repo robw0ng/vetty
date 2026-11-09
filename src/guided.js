@@ -32,8 +32,8 @@ function claudeReview() {
     let value = null;
     try {
       value = key ? parseClaudeReview(fs.readFileSync(p, 'utf8'), branch) : null;
-    } catch {
-      // unreadable mid-write — the watcher fires again when the write completes
+    } catch (e) {
+      dbg(`claude-review.json unreadable: ${e.message}`); // mid-write: the watcher fires again when it completes
     }
     claudeCache = { key, value };
   }

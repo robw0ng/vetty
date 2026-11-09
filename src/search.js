@@ -299,4 +299,4 @@ class SearchView {
   }
 }
 
-module.exports = { SearchView, postSearchCounts, postGroups, runScopedSearch };
+module.exports = { SearchView, postSearchCounts };
