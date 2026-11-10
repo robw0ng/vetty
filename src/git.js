@@ -146,13 +146,46 @@ async function gitAddChunked(cwd, files) {
 // GitHub's "files changed" (only what this branch added since it forked) — diffing against the tip
 // of a base that has since advanced would wrongly include every file the base moved ahead on.
 // If base IS an ancestor (e.g. the current branch), merge-base ≈ HEAD, so working changes still show.
-async function mergeBaseRef(cwd, base) {
+/** The merge-base to diff against. For a local base, HEAD's merge-base with it AND with
+ *  `origin/<base>` are both taken and the one nearer HEAD wins: a stale local base (never pulled)
+ *  or a stale origin (not fetched) would otherwise make upstream commits the branch already
+ *  merged look like its own work. Equal → local; one missing → the other; diverged (neither
+ *  contains the other, rare) → origin, logged. Cached by the pair, so the ancestor check only
+ *  reruns when a merge-base moves. */
+const mergeBaseCache = new Map(); // base → { key: 'mbLocal\nmbOrigin', ref }
+async function mergeBaseOf(cwd, ref) {
   try {
-    const mb = (await git(cwd, ['merge-base', base, 'HEAD'])).trim();
-    return mb || base;
+    return (await git(cwd, ['merge-base', ref, 'HEAD'])).trim() || null;
   } catch {
-    return base;
+    return null; // ref missing (no upstream) or unrelated history
   }
+}
+async function isAncestor(cwd, a, b) {
+  try {
+    await git(cwd, ['merge-base', '--is-ancestor', a, b]); // exit 1 (throws) = not an ancestor
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function mergeBaseRef(cwd, base) {
+  if (!base) return base;
+  const local = await mergeBaseOf(cwd, base);
+  if (base === 'HEAD' || base.startsWith('origin/')) return local || base;
+  const origin = await mergeBaseOf(cwd, `origin/${base}`);
+  if (!local || !origin || local === origin) return local || origin || base;
+  const key = `${local}\n${origin}`;
+  const hit = mergeBaseCache.get(base);
+  if (hit && hit.key === key) return hit.ref;
+  let ref;
+  if (await isAncestor(cwd, local, origin)) ref = origin; // local base is behind: origin's is newer
+  else if (await isAncestor(cwd, origin, local)) ref = local; // origin not fetched lately: local is newer
+  else {
+    ref = origin;
+    dbg(`merge-bases of ${base} and origin/${base} diverged (${local.slice(0, 7)} vs ${origin.slice(0, 7)}) — using origin's`);
+  }
+  mergeBaseCache.set(base, { key, ref });
+  return ref;
 }
 
 /** GitHub CLI. PR features are gated on this being present + authenticated. */

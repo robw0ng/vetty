@@ -100,13 +100,34 @@ class VettyService(internal val project: Project, internal val cs: CoroutineScop
 
     private var baseRefCache: Pair<String, String>? = null  // base → merge-base ref; recomputed once per reload
 
-    /** Merge-base of base…HEAD — the "whole branch" reference, like GitHub's files-changed (cached). */
+    /** Merge-base of base…HEAD — the "whole branch" reference, like GitHub's files-changed (cached
+     *  per reload). For a local base, its merge-base AND origin/<base>'s are both taken and the one
+     *  nearer HEAD wins: a stale local (never pulled) or a stale origin (not fetched) would otherwise
+     *  make upstream commits the branch already merged look like its own work. Equal → local; one
+     *  missing → the other; diverged (rare) → origin, logged. The ancestor check is cached by the pair. */
     internal fun baseRef(): String? {
         val b = base() ?: return null
         baseRefCache?.let { if (it.first == b) return it.second }
-        val mb = git("merge-base", b, "HEAD").trim()
-        val ref = if (mb.isNotEmpty()) mb else b
+        val local = git("merge-base", b, "HEAD").trim().ifEmpty { null }
+        val ref = if (b == "HEAD" || b.startsWith("origin/")) local ?: b else {
+            val origin = git("merge-base", "origin/$b", "HEAD").trim().ifEmpty { null }
+            if (local == null || origin == null || local == origin) local ?: origin ?: b
+            else newerMergeBase(b, local, origin)
+        }
         baseRefCache = b to ref
+        return ref
+    }
+
+    private var mergeBasePair: Pair<String, String>? = null   // "local\norigin" → the winner
+    private fun newerMergeBase(b: String, local: String, origin: String): String {
+        val key = "$local\n$origin"
+        mergeBasePair?.let { if (it.first == key) return it.second }
+        val ref = when {
+            git.exitCode("merge-base", "--is-ancestor", local, origin) == 0 -> origin   // local base behind: origin's newer
+            git.exitCode("merge-base", "--is-ancestor", origin, local) == 0 -> local    // origin not fetched: local newer
+            else -> { dbg { "merge-bases of $b and origin/$b diverged (${local.take(7)} vs ${origin.take(7)}) — using origin's" }; origin }
+        }
+        mergeBasePair = key to ref
         return ref
     }
 

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.0.118
+
+- **Fix (both editors):** a stale local base branch (e.g. `master` behind `origin/master` because it
+  was never pulled) made the merge-base old, so upstream commits the branch had already merged
+  showed up as its own changes (94 files instead of 30). Vetty now takes HEAD's merge-base with
+  both the local base and `origin/<base>` and diffs against whichever is nearer HEAD: a stale
+  local or a stale origin (not fetched) no longer matters. Equal → local; one missing → the
+  other; diverged (rare) → origin, logged in the debug channel. Where the merge-base moves because
+  of this, files whose content changed since you viewed them re-flag as Unviewed once (the usual
+  rebase rule).
+
 ## 0.0.117
 
 - **Fix (both editors, stage-on-view):** files edited and committed after you viewed them (e.g. by

@@ -215,9 +215,88 @@ assert.ok(
     fs.writeFileSync(path.join(dir, goneRel), 'resurrected\n');
     assert.ok(!core.isViewed(dir, tomb, goneRel), 'tombstone unviewed once the file returns');
     fs.rmSync(dir, { recursive: true, force: true });
-    return ownIndexWritesAreSuppressed();
+    return newerMergeBaseWins().then(() => ownIndexWritesAreSuppressed());
   });
 }
+
+// mergeBaseRef: of the local base and origin/<base>, the merge-base nearer HEAD wins.
+async function newerMergeBaseWins() {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const Module = require('module');
+  const { execFileSync } = require('child_process');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vetty-base-')));
+  const origin = path.join(root, 'origin.git');
+  const dir = path.join(root, 'work');
+  const g = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe' }).toString().trim();
+  const clean = () => fs.rmSync(root, { recursive: true, force: true });
+  for (const k of Object.keys(require.cache)) if (k.startsWith(path.join(__dirname, '..', 'src'))) delete require.cache[k];
+  const origLoad = Module._load;
+  Module._load = (r, p, m) => (r === 'vscode'
+    ? {
+        EventEmitter: class { get event() { return () => {}; } fire() {} },
+        workspace: { workspaceFolders: [{ uri: { fsPath: dir } }], getConfiguration: () => ({ get: (_k, d) => d }) },
+        window: {}, commands: {}, Uri: {}, RelativePattern: class {},
+      }
+    : origLoad(r, p, m));
+  const core = require('../src/core.js');
+  Module._load = origLoad;
+  const commit = (name) => {
+    fs.writeFileSync(path.join(dir, `${name}.txt`), `${name}\n`);
+    g(dir, 'add', '-A');
+    g(dir, 'commit', '-qm', name);
+    return g(dir, 'rev-parse', 'HEAD');
+  };
+  try {
+    g(root, 'init', '-q', '--bare', '-b', 'master', origin);
+    g(root, 'clone', '-q', origin, dir);
+    g(dir, 'config', 'user.email', 't@t');
+    g(dir, 'config', 'user.name', 't');
+    const one = commit('one');
+    g(dir, 'push', '-q', 'origin', 'master');
+    g(dir, 'checkout', '-q', '-b', 'feat');
+    commit('feat');
+    assert.strictEqual(await core.mergeBaseRef(dir, 'master'), one, 'equal → local merge-base');
+    // 1. stale local: upstream moved on and feat merged it; local master never pulled
+    g(dir, 'checkout', '-q', 'master');
+    const up = commit('upstream');
+    g(dir, 'push', '-q', 'origin', 'master');
+    g(dir, 'reset', '-q', '--hard', one);
+    g(dir, 'checkout', '-q', 'feat');
+    g(dir, 'merge', '-q', '--no-edit', 'origin/master');
+    assert.strictEqual(await core.mergeBaseRef(dir, 'master'), up, "stale local → origin's merge-base");
+    // 2. stale origin: local master gets a commit feat then merges; origin not fetched
+    g(dir, 'checkout', '-q', 'master');
+    g(dir, 'merge', '-q', '--ff-only', 'origin/master');
+    const loc = commit('local-ahead');
+    g(dir, 'checkout', '-q', 'feat');
+    g(dir, 'merge', '-q', '--no-edit', 'master');
+    assert.strictEqual(await core.mergeBaseRef(dir, 'master'), loc, "stale origin → local's merge-base");
+    // 3. diverged: origin master gets its own commit (via a second clone), feat merges both sides
+    const other = path.join(root, 'other');
+    g(root, 'clone', '-q', origin, other);
+    g(other, 'config', 'user.email', 't@t');
+    g(other, 'config', 'user.name', 't');
+    fs.writeFileSync(path.join(other, 'remote-only.txt'), 'r\n');
+    g(other, 'add', '-A');
+    g(other, 'commit', '-qm', 'remote-only');
+    g(other, 'push', '-q', 'origin', 'master');
+    g(dir, 'fetch', '-q', 'origin');
+    g(dir, 'merge', '-q', '--no-edit', 'origin/master');
+    const mbOrigin = g(dir, 'merge-base', 'origin/master', 'HEAD');
+    const mbLocal = g(dir, 'merge-base', 'master', 'HEAD');
+    assert.notStrictEqual(mbOrigin, mbLocal, 'setup: merge-bases differ');
+    assert.strictEqual(await core.mergeBaseRef(dir, 'master'), mbOrigin, "diverged → origin's merge-base");
+    // 4. no upstream ref at all → local
+    assert.strictEqual(await core.mergeBaseRef(dir, 'feat'), g(dir, 'rev-parse', 'HEAD'), 'no origin/feat → local merge-base');
+    clean();
+  } catch (e) {
+    clean();
+    throw e;
+  }
+}
+
 
 // `git diff` refreshes the index's stat cache and WRITES .git/index — and load() runs six of them.
 // The .git watcher fires on that write and schedules a reload, which runs the reads again: an
