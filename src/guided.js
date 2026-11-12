@@ -101,9 +101,10 @@ function writeScope(scope) {
 function guidedReviewOn(context) {
   return context.workspaceState.get('vetty.guidedReview') === true;
 }
-/** Editor threads for Claude's block/detail notes start expanded (true) or collapsed (default). */
+/** Editor threads for Claude's block/detail notes: expanded unless "Collapse Guided Notes" (⋯) was
+ *  chosen for this workspace. Unset = expanded. */
 function guidedNotesExpanded(context) {
-  return context.workspaceState.get('vetty.guidedNotesExpanded') === true;
+  return context.workspaceState.get('vetty.guidedNotesExpanded') !== false;
 }
 
 module.exports = {

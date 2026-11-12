@@ -4,7 +4,9 @@
 
 - **Guided review starts folded in the Comments view** (VS Code): the "Guided review" group and its
   per-file rows begin collapsed, so the list is minimized until you expand it. VS Code remembers
-  your expand/collapse across refreshes and reloads. Inline editor notes are unchanged.
+  your expand/collapse across refreshes and reloads.
+- **Inline guided notes start expanded** (VS Code), all of them; "Collapse Guided Notes" in the ⋯
+  menu still folds the detail notes and is remembered per workspace.
 
 ## 0.0.118
 
