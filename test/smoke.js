@@ -484,6 +484,25 @@ async function fastReadsMatchOldCommands() {
     await check('commit range', 'HEAD');
     await ctx.workspaceState.update('vetty.diffRange', 'branch');
 
+    // In-flight guard: a burst of load() calls = the running one + ONE queued rerun that every
+    // mid-run caller shares (and that sees state changed during the first run).
+    {
+      const runs = [];
+      const orig = t._load.bind(t);
+      t._load = () => { runs.push(1); return orig(); };
+      const p1 = t.load();
+      const p2 = t.load();
+      const p3 = t.load();
+      w('late.txt', 'late\n');
+      t.markUntrackedStale();
+      assert.notStrictEqual(p1, p2, 'second call does not share the running load');
+      assert.strictEqual(p2, p3, 'mid-run callers share one queued rerun');
+      await Promise.all([p1, p2, p3]);
+      assert.strictEqual(runs.length, 2, 'three calls → two runs');
+      assert.ok(t.files.includes('late.txt'), 'the queued rerun saw the file created mid-run');
+      t._load = orig;
+      fs.rmSync(path.join(dir, 'late.txt'));
+    }
     // Untracked scan reuse: an edit to an existing file must NOT rescan; create/delete (or a manual
     // refresh) must. Observed through what the tree lists.
     await t.load(true);

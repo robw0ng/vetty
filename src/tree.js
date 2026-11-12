@@ -3,7 +3,7 @@
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
-const { parseNumstat, ago } = require('../lib');
+const { parseNumstat, parseRawDiff, parsePorcelainZ, ago } = require('../lib');
 const core = require('./core');
 const {
   app, getCwd, git, untrackedFiles, getViewed, setViewed, viewedEntries, getIgnored, getGroups, setGroups, isViewed,
@@ -158,11 +158,29 @@ class DiffTree {
     this._untrackedStale = true;
   }
 
-  async load(rescanUntracked = false) {
+  /** Refresh. One run at a time: a call while one is in flight shares a single follow-up run that
+   *  starts when the current one ends (watcher bursts used to stack several concurrent runs). */
+  load(rescanUntracked = false) {
+    if (rescanUntracked) this._untrackedStale = true;
+    if (!this._inflight) {
+      this._inflight = this._load().finally(() => {
+        this._inflight = null;
+      });
+      return this._inflight;
+    }
+    // ponytail: callers who arrive mid-run all await the one queued rerun (fresh data for them too)
+    this._queued ??= this._inflight.catch(() => {}).then(() => {
+      this._queued = null;
+      return this.load();
+    });
+    return this._queued;
+  }
+
+  async _load() {
     const t0 = Date.now();
     const cwd = getCwd();
     // Snapshot the flag before the scan: a create/delete landing mid-scan must survive into the next load.
-    const rescan = rescanUntracked || this._untrackedStale || this._untracked.cwd !== cwd;
+    const rescan = this._untrackedStale || this._untracked.cwd !== cwd;
     this._untrackedStale = false;
     this.base = cwd ? await resolveBase(this.context, cwd) : lastBranch(this.context);
     this.baseRef = cwd && this.base ? await mergeBaseRef(cwd, this.base) : this.base;
@@ -183,11 +201,16 @@ class DiffTree {
     const wtOnly = new Set(); // branch range: changed vs HEAD but NOT vs the merge-base (committed, then undone)
     if (cwd && this.base) {
       try {
-        // All six git reads are independent — run them concurrently (sequential spawns made every
-        // refresh, and the stage markers with it, take ~half a second on Windows).
-        const [out, ns, wOut, untracked, cachedOut, dirtyOut] = await Promise.all([
-          git(cwd, ['diff', '--name-status', this.listRef]),
-          git(cwd, ['diff', '--numstat', this.listRef]),
+        // Independent reads run concurrently. One `diff` carries the file list (--raw), the line
+        // counts (--numstat) AND the added-lines patch (-U0) the TODO view scans — three spawns and
+        // three index walks used to do that. One `status` replaces `diff --cached --name-only` +
+        // `diff --name-only` for the stage markers.
+        const [rawOut, wOut, untracked, porcelain] = await Promise.all([
+          // A giant patch (generated files) can top git()'s 16 MB stdout cap: then take the list
+          // without the patch and let the TODO scan fail on its own, as it did before.
+          git(cwd, ['diff', '--raw', '--numstat', '-U0', this.listRef]).catch((e) =>
+            /maxBuffer/.test(e.message) ? git(cwd, ['diff', '--raw', '--numstat', this.listRef]).then((o) => ({ noPatch: o })) : Promise.reject(e)
+          ),
           // Files with real (non-whitespace) changes — anything else is formatting-only. Use -w --numstat,
           // NOT --name-only: `--name-only -w` still LISTS trailing-whitespace / final-newline / CRLF-only
           // files (so they'd never hide), but --numstat emits no row for them. Keep binary files
@@ -195,25 +218,21 @@ class DiffTree {
           this.hideWhitespace ? git(cwd, ['diff', '-w', '--numstat', this.listRef]) : Promise.resolve(''),
           rescan ? untrackedFiles(cwd) : Promise.resolve(this._untracked.list),
           // Staged markers: `*` = in the index, `^` = staged but edited since (index ≠ working tree).
-          git(cwd, ['diff', '--cached', '--name-only']),
-          git(cwd, ['diff', '--name-only']),
+          git(cwd, ['status', '--porcelain=v1', '-z', '--untracked-files=no']),
         ]);
-        const addNameStatus = (text, keep) => {
-          for (const line of text.split('\n')) {
-            const parts = line.split('\t');
-            if (parts.length < 2) continue;
-            const rel = parts[parts.length - 1].trim(); // rename → new path
-            if (!rel || !keep(rel)) continue;
-            const letter = parts[0].trim()[0];
+        const raw = parseRawDiff(rawOut.noPatch ?? rawOut);
+        const addEntries = (entries, keep) => {
+          for (const { rel, letter } of entries) {
+            if (!keep(rel)) continue; // rename → new path
             files.push(rel);
             status.set(rel, letter);
             if (letter === 'A') added.add(rel);
             if (letter === 'D') deleted.add(rel);
           }
         };
-        addNameStatus(out, () => true);
+        addEntries(raw.entries, () => true);
         // +/- line counts (binary files report "-\t-"); skipped silently.
-        parseNumstat(ns).forEach((v, k) => stat.set(k, v));
+        raw.stat.forEach((v, k) => stat.set(k, v));
         for (const line of wOut.split('\n')) {
           const parts = line.split('\t');
           if (parts.length >= 3 && parts[2].trim()) realChanged.add(parts[2].trim());
@@ -228,13 +247,9 @@ class DiffTree {
           const n = untrackedLineCount(cwd, rel);
           if (n !== null) stat.set(rel, { add: n, del: 0 });
         }
-        for (const r of cachedOut.split('\n')) {
-          const rel = r.trim();
-          if (rel) staged.add(rel);
-        }
-        for (const r of dirtyOut.split('\n')) {
-          const rel = r.trim();
-          if (!rel) continue;
+        const st = parsePorcelainZ(porcelain);
+        for (const rel of st.staged) staged.add(rel);
+        for (const rel of st.dirty) {
           dirty.add(rel);
           if (staged.has(rel)) staleStaged.add(rel); // working ≠ index on a staged file
         }
@@ -244,16 +259,13 @@ class DiffTree {
         const uncommittedOnly = [...staged, ...dirty].filter((r) => !status.has(r));
         if (this.listRef !== 'HEAD' && uncommittedOnly.length) {
           const keep = new Set(uncommittedOnly);
-          const [hns, hnum] = await Promise.all([
-            git(cwd, ['diff', '--name-status', 'HEAD']),
-            git(cwd, ['diff', '--numstat', 'HEAD']),
-          ]);
-          addNameStatus(hns, (r) => {
+          const head = parseRawDiff(await git(cwd, ['diff', '--raw', '--numstat', 'HEAD']));
+          addEntries(head.entries, (r) => {
             if (!keep.has(r) || status.has(r)) return false;
             wtOnly.add(r);
             return true;
           });
-          parseNumstat(hnum).forEach((v, k) => wtOnly.has(k) && stat.set(k, v));
+          head.stat.forEach((v, k) => wtOnly.has(k) && stat.set(k, v));
         }
         // Stage-on-view sync: staging outside vetty (Source Control panel) counts as a review too.
         // Only clean staged files (index == working tree) qualify — a stale-staged file's working
@@ -291,12 +303,14 @@ class DiffTree {
         }
         this.untracked = untracked; // shared with the TODO scan (same refresh) — saves a `git ls-files`
         if (rescan) this._untracked = { cwd, list: untracked }; // a reusing load must not clobber a fresher list
+        this.todoPatch = rawOut.noPatch ? undefined : raw.patch; // TODO scan reads this instead of its own `diff -U0`
         this._lastErr = null;
       } catch (e) {
         // Empty tree + a visible reason, once per distinct error (refreshes fire every ~400ms).
         const msg = String(e?.message || e).split('\n')[0];
         if (msg !== this._lastErr) vscode.window.showErrorMessage(`Vetty: ${msg}`);
         this._lastErr = msg;
+        this.todoPatch = undefined; // not this ref's — the TODO view scans on its own (and fails the same way)
       }
     }
     this.files = files;

@@ -18,7 +18,7 @@ class TodoTree {
   async load() {
     const cwd = getCwd();
     const ref = app.diffTree?.listRef; // honor the active diff mode (branch merge-base vs HEAD)
-    this.items = cwd && ref ? await findTodos(cwd, ref, app.diffTree?.untracked) : [];
+    this.items = cwd && ref ? await findTodos(cwd, ref, app.diffTree?.untracked, app.diffTree?.todoPatch) : [];
     this.refresh();
   }
   getTreeItem(el) {

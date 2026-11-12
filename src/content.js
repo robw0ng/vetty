@@ -121,14 +121,17 @@ async function untrackedFiles(cwd) {
 }
 
 /** TODO/FIXME markers on added diff lines vs `ref` + every line of untracked files.
- *  `untracked` = the list DiffTree.load() already fetched this refresh (else fetched here). */
-async function findTodos(cwd, ref, untracked) {
-  let out = '';
-  try {
-    out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
-  } catch (e) {
-    dbg(`todo scan failed: ${e.message}`);
-    return [];
+ *  `untracked` / `patch` = what DiffTree.load() already fetched this refresh (the -U0 patch rides
+ *  on its `diff --raw --numstat`); either missing → fetched here. */
+async function findTodos(cwd, ref, untracked, patch) {
+  let out = patch;
+  if (typeof out !== 'string') {
+    try {
+      out = await git(cwd, ['diff', '-U0', '--diff-filter=d', ref]); // -U0 → only added lines, no context
+    } catch (e) {
+      dbg(`todo scan failed: ${e.message}`);
+      return [];
+    }
   }
   const todos = parseTodoHunks(out, TODO_RE); // { rel, line, text }[]
   for (const u of untracked ?? (await untrackedFiles(cwd))) {

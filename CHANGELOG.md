@@ -6,6 +6,11 @@
   working-tree walk) now only re-runs when a file is created or deleted, git state changes, or
   `.gitignore` is edited; editing an existing file reuses the last list. The Refresh button always
   rescans.
+- **Fewer git reads per refresh** (VS Code): one `git diff` now carries the file list, the line
+  counts and the TODO scan's patch (three reads before), and one `git status` replaces the two
+  diffs behind the staged/edited markers. A burst of changes runs one refresh at a time with a
+  single follow-up instead of several overlapping ones. The listed files, order, counts and markers
+  are unchanged (pinned by a fixture test against the old commands).
 
 ## 0.0.119
 
