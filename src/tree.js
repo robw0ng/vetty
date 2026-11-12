@@ -606,13 +606,15 @@ class DiffTree {
   }
 }
 
-/** Parent rows for a per-file list (TODOs, comments): file icon + name, dir + count dimmed, expanded.
- *  `pairs` = [rel, entry][]; returns TreeItems carrying `.rel` and `.entries` (insertion order kept). */
-function fileGroups(cwd, pairs, kind) {
+/** Parent rows for a per-file list (TODOs, comments): file icon + name, dir + count dimmed, expanded
+ *  unless `collapsed`. `pairs` = [rel, entry][]; returns TreeItems carrying `.rel` and `.entries`
+ *  (insertion order kept). Stable ids → VS Code keeps the user's expand/collapse across refreshes. */
+function fileGroups(cwd, pairs, kind, collapsed = false) {
   const byRel = new Map();
   for (const [rel, e] of pairs) (byRel.get(rel) || byRel.set(rel, []).get(rel)).push(e);
+  const state = collapsed ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded;
   return [...byRel].map(([rel, entries]) => {
-    const it = new vscode.TreeItem(path.basename(rel), vscode.TreeItemCollapsibleState.Expanded);
+    const it = new vscode.TreeItem(path.basename(rel), state);
     const dir = path.dirname(rel);
     it.description = [dir === '.' ? '' : dir, String(entries.length)].filter(Boolean).join('  ·  ');
     it.tooltip = rel;

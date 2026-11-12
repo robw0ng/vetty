@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.119
+
+- **Guided review starts folded in the Comments view** (VS Code): the "Guided review" group and its
+  per-file rows begin collapsed, so the list is minimized until you expand it. VS Code remembers
+  your expand/collapse across refreshes and reloads. Inline editor notes are unchanged.
+
 ## 0.0.118
 
 - **Fix (both editors):** a stale local base branch (e.g. `master` behind `origin/master` because it

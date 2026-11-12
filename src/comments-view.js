@@ -76,10 +76,11 @@ class CommentsTree {
       return [it];
     }
     if (!guided.length) return fileGroups(getCwd(), pairs, 'comment'); // no guided review → no extra level
-    // Two sections so Claude's notes can be collapsed away, leaving just your comments. Stable ids →
-    // VS Code remembers each section's collapsed state across refreshes and reloads.
-    const section = (id, label, icon, entries) => {
-      const it = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Expanded);
+    // Two sections so Claude's notes can be collapsed away, leaving just your comments. Guided review
+    // starts folded (its file rows too): the list is noise until you want it. Stable ids → VS Code
+    // remembers each section's collapsed state across refreshes and reloads.
+    const section = (id, label, icon, entries, collapsed = false) => {
+      const it = new vscode.TreeItem(label, collapsed ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded);
       it.id = id;
       it.iconPath = new vscode.ThemeIcon(icon);
       it.contextValue = id;
@@ -88,7 +89,7 @@ class CommentsTree {
     };
     return [
       section('commentSection', `Comments (${pairs.length})`, 'comment', fileGroups(getCwd(), pairs, 'comment')),
-      section('guidedSection', `Guided review (${guided.length})`, 'sparkle', fileGroups(getCwd(), guided, 'guided')),
+      section('guidedSection', `Guided review (${guided.length})`, 'sparkle', fileGroups(getCwd(), guided, 'guided', true), true),
     ];
   }
 }
