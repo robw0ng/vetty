@@ -82,7 +82,7 @@ async function revertFiles(context, item, sel) {
       vscode.window.showErrorMessage(`Revert failed for ${rel}: ${e.message}`);
     }
   }
-  await app.diffTree.load();
+  await app.diffTree.load(true); // untracked files were deleted — rescan now, not on the watcher's next event
 }
 
 /** Restore file(s) to the content you last marked viewed (the review snapshot). The restored

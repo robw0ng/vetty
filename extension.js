@@ -58,7 +58,7 @@ function activate(context) {
     vscode.commands.registerCommand('vetty.clearViewed', () => cmds.clearViewed(context)),
     // Tree (Activity Bar) commands.
     vscode.commands.registerCommand('vetty.treePickBranch', () => cmds.treePickBranch(context)),
-    vscode.commands.registerCommand('vetty.treeRefresh', () => app.diffTree.load()),
+    vscode.commands.registerCommand('vetty.treeRefresh', () => app.diffTree.load(true)), // manual: full rescan
     vscode.commands.registerCommand('vetty.treeOpenUnviewed', () => cmds.treeOpenUnviewed(context)),
     vscode.commands.registerCommand('vetty.treeOpenFile', (item, sel) => cmds.treeOpenFile(item, sel)),
     vscode.commands.registerCommand('vetty.treeOpenDiff', (item, sel) => cmds.treeOpenDiff(item, sel)),
@@ -150,8 +150,11 @@ function activate(context) {
     const cwd = core.getCwd();
     if (cwd) {
       let timer = null;
-      app.bumpReload = (uri) => {
+      // `kind`: 'change' = an existing file's contents (the untracked list can't have moved);
+      // anything else (create/delete, a .git event, no uri) also re-runs the untracked scan.
+      app.bumpReload = (uri, kind) => {
         if (uri) core.dbg(`watch → reload: ${uri.fsPath ?? uri}`); // churn attribution
+        if (kind !== 'change') app.diffTree.markUntrackedStale();
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => app.diffTree.load(), 400); // load() re-resolves the base (handles branch switches)
       };
@@ -161,18 +164,18 @@ function activate(context) {
       // ...but its default excludes cover .git/objects only, NOT refs, logs, or index. Every git
       // command writes some of those, so without this filter a reload schedules another reload.
       // The .git files that genuinely matter are watchGitDir's job (HEAD, ORIG_HEAD, index).
-      const bumpWorkingFile = (uri) => {
+      const bumpWorkingFile = (uri, kind) => {
         const p = (uri?.fsPath ?? String(uri)).replace(/\\/g, '/');
         // Both the contents AND the directory itself. Every git write goes through .git/index.lock,
         // and creating/removing that file mutates the .git DIRECTORY — which VS Code reports as a
         // change to `.../.git`, a path containing no '/.git/' segment. Miss that and the reload
         // loop survives with its index events already suppressed: a different door, same room.
         if (p.includes('/.git/') || p.endsWith('/.git')) return;
-        app.bumpReload(uri);
+        app.bumpReload(uri, p.endsWith('/.gitignore') ? 'create' : kind); // an ignore edit changes the untracked set
       };
-      fileWatcher.onDidChange(bumpWorkingFile);
-      fileWatcher.onDidCreate(bumpWorkingFile);
-      fileWatcher.onDidDelete(bumpWorkingFile);
+      fileWatcher.onDidChange((uri) => bumpWorkingFile(uri, 'change'));
+      fileWatcher.onDidCreate((uri) => bumpWorkingFile(uri, 'create'));
+      fileWatcher.onDidDelete((uri) => bumpWorkingFile(uri, 'delete'));
       context.subscriptions.push(fileWatcher);
       await core.detectGh(cwd);
       await core.pruneStaleState(context, cwd); // GC stale per-base state (deleted branches)

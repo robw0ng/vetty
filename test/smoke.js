@@ -215,7 +215,7 @@ assert.ok(
     fs.writeFileSync(path.join(dir, goneRel), 'resurrected\n');
     assert.ok(!core.isViewed(dir, tomb, goneRel), 'tombstone unviewed once the file returns');
     fs.rmSync(dir, { recursive: true, force: true });
-    return newerMergeBaseWins().then(() => ownIndexWritesAreSuppressed());
+    return newerMergeBaseWins().then(() => fastReadsMatchOldCommands()).then(() => ownIndexWritesAreSuppressed());
   });
 }
 
@@ -294,6 +294,212 @@ async function newerMergeBaseWins() {
   } catch (e) {
     clean();
     throw e;
+  }
+}
+
+
+// vscode stand-in rich enough for DiffTree: real EventEmitter/TreeItem shapes, everything else a
+// callable, constructible proxy. `dir` is the single workspace folder.
+function fakeVscode(dir) {
+  const h = { get: (t, k) => (k in t ? t[k] : k === 'then' ? undefined : mk(String(k))) };
+  const mk = (name) => new Proxy(function () { return new Proxy({ __name: name }, h); }, h);
+  const enumish = (names) => Object.fromEntries(names.map((n, i) => [n, i]));
+  return new Proxy({
+    EventEmitter: class { constructor() { this.event = () => ({ dispose() {} }); } fire() {} dispose() {} },
+    TreeItem: class { constructor(label, state) { this.label = label; this.collapsibleState = state; } },
+    TreeItemCollapsibleState: enumish(['None', 'Collapsed', 'Expanded']),
+    CommentThreadCollapsibleState: enumish(['Collapsed', 'Expanded']),
+    CommentMode: enumish(['Editing', 'Preview']),
+    ThemeIcon: class { constructor(id) { this.id = id; } },
+    ThemeColor: class { constructor(id) { this.id = id; } },
+    MarkdownString: class { constructor(v = '') { this.value = v; } appendMarkdown(s) { this.value += s; return this; } appendText(s) { this.value += s; return this; } },
+    Uri: { file: (p) => ({ fsPath: p, scheme: 'file', with: () => ({ fsPath: p }) }), parse: (s) => ({ fsPath: s, scheme: 'x', query: '' }) },
+    RelativePattern: class {},
+    workspace: {
+      workspaceFolders: [{ uri: { fsPath: dir } }],
+      getConfiguration: () => ({ get: (_k, d) => d }),
+      createFileSystemWatcher: () => ({ onDidChange() {}, onDidCreate() {}, onDidDelete() {}, dispose() {} }),
+      onDidChangeConfiguration: () => ({ dispose() {} }),
+      onDidChangeTextDocument: () => ({ dispose() {} }),
+      textDocuments: [],
+    },
+    window: {
+      createOutputChannel: () => ({ appendLine() {}, show() {} }),
+      visibleTextEditors: [], onDidChangeActiveTextEditor: () => ({ dispose() {} }),
+      setStatusBarMessage() {}, showInformationMessage() {}, showWarningMessage() {}, showErrorMessage() {},
+    },
+    commands: { executeCommand: async () => {} },
+    comments: { createCommentController: () => ({ createCommentThread: (uri, range, comments) => ({ uri, range, comments, dispose() {} }), dispose() {} }) },
+    env: { clipboard: { writeText: async () => {} } },
+  }, h);
+}
+function fakeContext() {
+  const m = new Map();
+  const store = { get: (k, d) => (m.has(k) ? m.get(k) : d), update: async (k, v) => { m.set(k, v); }, keys: () => [...m.keys()] };
+  return { subscriptions: [], workspaceState: store, globalState: store, globalStorageUri: { fsPath: require('os').tmpdir() } };
+}
+/** A fresh src/ with vscode stubbed for `dir`. The stub stays installed (load() lazy-requires views)
+ *  until the returned restore() runs. */
+function freshSrc(dir) {
+  const Module = require('module');
+  const path = require('path');
+  for (const k of Object.keys(require.cache)) if (k.startsWith(path.join(__dirname, '..', 'src'))) delete require.cache[k];
+  const origLoad = Module._load;
+  const vs = fakeVscode(dir);
+  Module._load = (r, p, m) => (r === 'vscode' ? vs : origLoad(r, p, m));
+  const core = require('../src/core.js');
+  const tree = require('../src/tree.js');
+  return { core, tree, vs, restore: () => { Module._load = origLoad; } };
+}
+
+// Perf path vs the commands it replaced. The refresh used to run `diff --name-status`, `diff --numstat`,
+// `diff --cached --name-only`, `diff --name-only` and `ls-files --others` on every load; the fast path
+// must list the same files in the same order with the same letters, counts and stage/dirty flags.
+// Expected values here come from those original commands, run directly against the fixture.
+async function fastReadsMatchOldCommands() {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const { execFileSync } = require('child_process');
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vetty-fast-')));
+  const g = (...a) => execFileSync('git', ['-c', 'core.quotePath=false', ...a], { cwd: dir, stdio: 'pipe' }).toString();
+  const w = (rel, text) => fs.writeFileSync(path.join(dir, rel), text);
+  const lines = (out) => out.split('\n').map((s) => s.trim()).filter(Boolean);
+  const clean = () => fs.rmSync(dir, { recursive: true, force: true });
+  const { core, tree, restore } = freshSrc(dir);
+  try {
+    g('init', '-q', '-b', 'master');
+    g('config', 'user.email', 't@t');
+    g('config', 'user.name', 't');
+    for (const f of ['a.txt', 'b.txt', 'del.txt', 'old.txt', 'sp ace.txt', 'rev.txt', 'keep.txt', 'ws.txt'])
+      w(f, `${f}\n1\n2\n3\n`);
+    fs.writeFileSync(path.join(dir, 'bin.png'), Buffer.from([0x89, 0x50, 0, 1, 2]));
+    g('add', '-A');
+    g('commit', '-qm', 'base');
+    g('checkout', '-q', '-b', 'feat');
+    // Committed on the branch: modify, add, delete, rename, binary, spaces, a later-reverted file,
+    // and a whitespace-only change (the -w numstat read stays separate but must still agree).
+    w('a.txt', 'a.txt\n1\nX\n3\n');
+    w('new.txt', 'n\n// TODO: new\n');
+    fs.rmSync(path.join(dir, 'del.txt'));
+    g('mv', 'old.txt', 'moved.txt');
+    fs.writeFileSync(path.join(dir, 'bin.png'), Buffer.from([0x89, 0x50, 0, 9, 9, 9]));
+    w('sp ace.txt', 'sp ace.txt\n1\n2\n3\n4 // FIXME: spaced\n');
+    w('rev.txt', 'rev.txt\nchanged\n');
+    w('ws.txt', 'ws.txt\n1 \n2\n3\n'); // trailing space only — invisible to `diff -w`
+    g('add', '-A');
+    g('commit', '-qm', 'feat');
+    const feat = g('rev-parse', 'HEAD').trim();
+    // Working tree: staged-clean, staged-then-edited, dirty-only, staged new file, untracked,
+    // and rev.txt put back to base content (differs from HEAD, not from the merge-base → wtOnly).
+    w('b.txt', 'b.txt\nstaged\n');
+    g('add', 'b.txt');
+    w('keep.txt', 'keep.txt\nstaged\n');
+    g('add', 'keep.txt');
+    w('keep.txt', 'keep.txt\nstaged\nthen edited\n');
+    w('a.txt', 'a.txt\n1\nX\n3\n// HACK dirty\n');
+    w('s.txt', 's\n');
+    g('add', 's.txt');
+    w('u.txt', 'u\n// TODO: untracked\n');
+    w('rev.txt', 'rev.txt\n1\n2\n3\n');
+
+    const ctx = fakeContext();
+    core.app.context = ctx;
+    await core.resolveRepoRoot();
+    await core.setBaseFor(ctx, 'feat', 'master');
+    const t = new tree.DiffTree(ctx);
+    core.app.diffTree = t;
+
+    // What the old reads say, for both ranges.
+    const expect = (ref) => {
+      const files = [];
+      const status = new Map();
+      const addNS = (text, keep) => {
+        for (const line of text.split('\n')) {
+          const parts = line.split('\t');
+          if (parts.length < 2) continue;
+          const rel = parts[parts.length - 1].trim();
+          if (!rel || !keep(rel)) continue;
+          files.push(rel);
+          status.set(rel, parts[0].trim()[0]);
+        }
+      };
+      addNS(g('diff', '--name-status', ref), () => true);
+      const stat = new Map();
+      const num = (out, keep) => {
+        for (const line of out.split('\n')) {
+          const m = line.match(/^(\d+)\t(\d+)\t(.+)$/);
+          if (m && keep(m[3].trim())) stat.set(m[3].trim(), { add: +m[1], del: +m[2] });
+        }
+      };
+      num(g('diff', '--numstat', ref), () => true);
+      const realChanged = new Set(lines(g('diff', '-w', '--numstat', ref)).map((l) => l.split('\t')[2].trim()));
+      const untracked = lines(g('ls-files', '--others', '--exclude-standard'));
+      for (const u of untracked) if (!status.has(u)) (files.push(u), status.set(u, 'U'));
+      const staged = new Set(lines(g('diff', '--cached', '--name-only')));
+      const dirty = new Set(lines(g('diff', '--name-only')));
+      const staleStaged = new Set([...dirty].filter((r) => staged.has(r)));
+      const wtOnly = new Set();
+      const keep = new Set([...staged, ...dirty].filter((r) => !status.has(r)));
+      if (ref !== 'HEAD' && keep.size) {
+        addNS(g('diff', '--name-status', 'HEAD'), (r) => keep.has(r) && !status.has(r) && (wtOnly.add(r), true));
+        num(g('diff', '--numstat', 'HEAD'), (r) => wtOnly.has(r));
+      }
+      return { files, status, stat, realChanged, untracked, staged, dirty, staleStaged, wtOnly };
+    };
+    const same = (label, got, want) => assert.deepStrictEqual(got instanceof Map || got instanceof Set ? [...got].sort() : got, want instanceof Map || want instanceof Set ? [...want].sort() : want, label);
+    const check = async (label, ref) => {
+      await t.load(true);
+      assert.strictEqual(t.listRef, ref, `${label}: listRef`);
+      const e = expect(ref);
+      same(`${label}: files (order)`, t.files, e.files);
+      same(`${label}: status`, t.status, e.status);
+      same(`${label}: staged`, t.staged, e.staged);
+      same(`${label}: dirty`, t.dirty, e.dirty);
+      same(`${label}: staleStaged`, t.staleStaged, e.staleStaged);
+      same(`${label}: wtOnly`, t.wtOnly, e.wtOnly);
+      same(`${label}: untracked`, t.untracked, e.untracked);
+      same(`${label}: added`, t.added, [...e.status].filter(([, l]) => l === 'A' || l === 'U').map(([r]) => r).sort());
+      same(`${label}: deleted`, t.deleted, [...e.status].filter(([, l]) => l === 'D').map(([r]) => r).sort());
+      for (const [rel, v] of e.stat) assert.deepStrictEqual(t.stat.get(rel), v, `${label}: counts for ${rel}`);
+      assert.deepStrictEqual(t.stat.get('u.txt'), { add: 2, del: 0 }, `${label}: untracked line count`);
+      if (t.hideWhitespace) same(`${label}: realChanged`, t.realChanged, e.realChanged);
+      // TODO scan: the markers on added lines + untracked files, as `diff -U0` found them.
+      const todos = await core.findTodos(dir, ref, t.untracked, t.todoPatch);
+      const want = [];
+      for (const [rel, hit] of [['a.txt', '// HACK dirty'], ['new.txt', '// TODO: new'], ['sp ace.txt', '4 // FIXME: spaced'], ['u.txt', '// TODO: untracked']])
+        if (e.status.has(rel) || rel === 'u.txt') want.push(`${rel}:${hit}`);
+      same(`${label}: todos`, todos.map((x) => `${x.rel}:${x.text}`).sort(), want.sort());
+      return e;
+    };
+    const mb = g('merge-base', 'master', 'HEAD').trim();
+    let e = await check('branch range', mb);
+    assert.ok(e.wtOnly.has('rev.txt') && e.staleStaged.has('keep.txt') && e.staged.has('b.txt') && e.status.get('moved.txt') === 'R' && e.status.get('del.txt') === 'D',
+      'fixture covers rename/delete/staged/stale/wtOnly');
+    t.hideWhitespace = true;
+    e = await check('branch range, hide whitespace', mb);
+    assert.ok(e.realChanged.size && !e.realChanged.has('ws.txt'), 'fixture covers a whitespace-only file');
+    t.hideWhitespace = false;
+    await ctx.workspaceState.update('vetty.diffRange', 'commit');
+    await check('commit range', 'HEAD');
+    await ctx.workspaceState.update('vetty.diffRange', 'branch');
+
+    // Untracked scan reuse: an edit to an existing file must NOT rescan; create/delete (or a manual
+    // refresh) must. Observed through what the tree lists.
+    await t.load(true);
+    w('u2.txt', 'late\n');
+    await t.load(); // a plain reload (contents changed) keeps the last list
+    assert.ok(!t.files.includes('u2.txt'), 'untracked list reused on a contents-only reload');
+    t.markUntrackedStale(); // what the watcher does on create/delete
+    await t.load();
+    assert.ok(t.files.includes('u2.txt'), 'untracked list rescanned after a create');
+    fs.rmSync(path.join(dir, 'u2.txt'));
+    await t.load(true); // the Refresh button
+    assert.ok(!t.files.includes('u2.txt'), 'manual refresh rescans');
+    assert.strictEqual(g('rev-parse', 'HEAD').trim(), feat, 'fixture HEAD untouched by the reads');
+  } finally {
+    restore();
+    clean();
   }
 }
 

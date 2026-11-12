@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.0.120
+
+- **Faster refresh on big repos** (VS Code). The untracked-file scan (the slowest git read, a full
+  working-tree walk) now only re-runs when a file is created or deleted, git state changes, or
+  `.gitignore` is edited; editing an existing file reuses the last list. The Refresh button always
+  rescans.
+
 ## 0.0.119
 
 - **Guided review starts folded in the Comments view** (VS Code): the "Guided review" group and its

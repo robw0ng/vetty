@@ -79,6 +79,11 @@ class DiffTree {
     this.base = lastBranch(context);
     this.files = [];
     this._healDenied = new Set(); // `rel\nsnapshot\nHEAD` already judged a real edit — no re-check per refresh
+    // `git ls-files --others` walks the whole tree (the slowest read by far) — only re-run it when the
+    // untracked set can have changed: a file created/deleted, a .git event (add/rm/checkout),
+    // a .gitignore edit, a manual refresh. Edits to existing files reuse the last list.
+    this._untracked = { cwd: null, list: [] };
+    this._untrackedStale = true;
     this.added = new Set(); // files absent from base — diff left side would be empty, so open them as files
     this.status = new Map(); // rel → status letter (A/M/R/C/T) for the file decoration badge
     this.stat = new Map(); // rel → { add, del } line counts from --numstat
@@ -148,9 +153,17 @@ class DiffTree {
     this._emitter.fire();
   }
 
-  async load() {
+  /** The next load re-runs the untracked scan (watcher create/delete, .git event, .gitignore edit). */
+  markUntrackedStale() {
+    this._untrackedStale = true;
+  }
+
+  async load(rescanUntracked = false) {
     const t0 = Date.now();
     const cwd = getCwd();
+    // Snapshot the flag before the scan: a create/delete landing mid-scan must survive into the next load.
+    const rescan = rescanUntracked || this._untrackedStale || this._untracked.cwd !== cwd;
+    this._untrackedStale = false;
     this.base = cwd ? await resolveBase(this.context, cwd) : lastBranch(this.context);
     this.baseRef = cwd && this.base ? await mergeBaseRef(cwd, this.base) : this.base;
     // Rebase/merge detection: the merge-base moved → purge marks for files the rebase changed,
@@ -180,7 +193,7 @@ class DiffTree {
           // files (so they'd never hide), but --numstat emits no row for them. Keep binary files
           // (`-\t-\tpath`) as real changes so hide-whitespace never swallows an image. Toggle-gated.
           this.hideWhitespace ? git(cwd, ['diff', '-w', '--numstat', this.listRef]) : Promise.resolve(''),
-          untrackedFiles(cwd),
+          rescan ? untrackedFiles(cwd) : Promise.resolve(this._untracked.list),
           // Staged markers: `*` = in the index, `^` = staged but edited since (index ≠ working tree).
           git(cwd, ['diff', '--cached', '--name-only']),
           git(cwd, ['diff', '--name-only']),
@@ -277,6 +290,7 @@ class DiffTree {
           }
         }
         this.untracked = untracked; // shared with the TODO scan (same refresh) — saves a `git ls-files`
+        if (rescan) this._untracked = { cwd, list: untracked }; // a reusing load must not clobber a fresher list
         this._lastErr = null;
       } catch (e) {
         // Empty tree + a visible reason, once per distinct error (refreshes fire every ~400ms).
