@@ -2,7 +2,7 @@
 // the closest ancestor from the branch tree. Also the per-session GC of state for deleted branches.
 const { parseAheadBehind, parseBranchTips, parseFirstParents, branchTree, parseWorktrees } = require('../lib');
 const { dbg } = require('./app');
-const { getCwd, git } = require('./git');
+const { getCwd, git, headRef, refTip } = require('./git');
 const { stateCache, setActiveBranch, activeBranchName, stateScope, getViewed, setViewed, isViewed } = require('./review-state');
 
 const LAST_BRANCH_KEY = 'vetty.lastBranch';
@@ -13,6 +13,12 @@ const TRUNK_NAMES = ['main', 'master', 'develop', 'dev', 'trunk'];
 const PARENT_MAX_AHEAD = 500;
 
 async function currentBranch(cwd) {
+  // .git/HEAD says it without a spawn: `x` on a branch, `HEAD` detached — what --abbrev-ref prints.
+  // Anything it would print differently (HEAD on a non-branch ref, a tag named like the branch →
+  // `heads/x`, unborn) still asks git.
+  const h = cwd === getCwd() ? headRef() : null;
+  if (h?.sha && h.detached) return 'HEAD';
+  if (h?.sha && h.branch && !refTip(`refs/tags/${h.branch}`)) return h.branch;
   try {
     return (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
   } catch {

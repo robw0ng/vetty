@@ -215,7 +215,7 @@ assert.ok(
     fs.writeFileSync(path.join(dir, goneRel), 'resurrected\n');
     assert.ok(!core.isViewed(dir, tomb, goneRel), 'tombstone unviewed once the file returns');
     fs.rmSync(dir, { recursive: true, force: true });
-    return newerMergeBaseWins().then(() => fastReadsMatchOldCommands()).then(() => ownIndexWritesAreSuppressed());
+    return newerMergeBaseWins().then(() => fastReadsMatchOldCommands()).then(() => refFileReadsMatchGit()).then(() => ownIndexWritesAreSuppressed());
   });
 }
 
@@ -517,6 +517,104 @@ async function fastReadsMatchOldCommands() {
     assert.ok(!t.files.includes('u2.txt'), 'manual refresh rescans');
     assert.strictEqual(g('rev-parse', 'HEAD').trim(), feat, 'fixture HEAD untouched by the reads');
   } finally {
+    restore();
+    clean();
+  }
+}
+
+
+// Ref reads from .git files vs what git says, in every layout that changes where the answer lives:
+// loose refs, packed-refs, a detached HEAD, a linked worktree (HEAD in the worktree's git dir, refs
+// in the common dir). And the merge-base memo: a repeat refresh with nothing moved spawns no git at
+// all; a moved tip or HEAD does.
+async function refFileReadsMatchGit() {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const cp = require('child_process');
+  const { promisify } = require('util');
+  const { execFileSync } = require('child_process');
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'vetty-refs-')));
+  const dir = path.join(root, 'main');
+  const wt = path.join(root, 'wt');
+  const g = (cwd, ...a) => execFileSync('git', a, { cwd, stdio: 'pipe' }).toString().trim();
+  const clean = () => fs.rmSync(root, { recursive: true, force: true });
+  // Count git spawns: git.js promisifies cp.execFile at load, so wrap before the fresh require.
+  let spawns = 0;
+  const origExecFile = cp.execFile;
+  const counted = function (...a) { spawns++; return origExecFile(...a); };
+  counted[promisify.custom] = (...a) => { spawns++; return origExecFile[promisify.custom](...a); };
+  cp.execFile = counted;
+  const { core, vs, restore } = freshSrc(dir);
+  try {
+    g(root, 'init', '-q', '-b', 'master', dir);
+    g(dir, 'config', 'user.email', 't@t');
+    g(dir, 'config', 'user.name', 't');
+    const commit = (cwd, name) => {
+      fs.writeFileSync(path.join(cwd, `${name}.txt`), `${name}\n`);
+      g(cwd, 'add', '-A');
+      g(cwd, 'commit', '-qm', name);
+      return g(cwd, 'rev-parse', 'HEAD');
+    };
+    const one = commit(dir, 'one');
+    g(dir, 'checkout', '-q', '-b', 'feat');
+    commit(dir, 'feat');
+    core.app.context = fakeContext();
+    await core.resolveRepoRoot();
+    const same = async (label) => {
+      assert.strictEqual(await core.currentBranch(dir), g(dir, 'rev-parse', '--abbrev-ref', 'HEAD'), `${label}: current branch`);
+      assert.strictEqual(core.headRef()?.sha, g(dir, 'rev-parse', 'HEAD'), `${label}: HEAD sha`);
+      assert.strictEqual(core.refTip('refs/heads/master'), g(dir, 'rev-parse', 'refs/heads/master'), `${label}: master tip`);
+      assert.strictEqual(await core.mergeBaseRef(dir, 'master'), g(dir, 'merge-base', 'master', 'HEAD'), `${label}: merge-base`);
+    };
+    spawns = 0;
+    await core.currentBranch(dir);
+    assert.strictEqual(spawns, 0, 'current branch read from .git/HEAD, no spawn');
+    await same('loose refs');
+    assert.strictEqual(core.refTip('refs/remotes/origin/master'), null, 'missing ref → null (no upstream)');
+    g(dir, 'pack-refs', '--all');
+    assert.ok(!fs.existsSync(path.join(dir, '.git', 'refs', 'heads', 'master')), 'setup: master is packed');
+    await same('packed-refs');
+    // Memo: same HEAD + tips → no spawn; a new commit on the base → recomputed.
+    spawns = 0;
+    assert.strictEqual(await core.mergeBaseRef(dir, 'master'), one, 'memo hit');
+    assert.strictEqual(spawns, 0, 'repeat merge-base with nothing moved spawns no git');
+    g(dir, 'checkout', '-q', 'master');
+    const two = commit(dir, 'two');
+    g(dir, 'checkout', '-q', 'feat');
+    g(dir, 'merge', '-q', '--no-edit', 'master');
+    assert.strictEqual(fs.readFileSync(path.join(dir, '.git', 'packed-refs'), 'utf8').includes(one), true, 'setup: packed-refs still holds the old master');
+    assert.strictEqual(core.refTip('refs/heads/master'), two, 'loose ref wins over the packed one');
+    assert.strictEqual(await core.mergeBaseRef(dir, 'master'), two, 'moved tip → recomputed');
+    assert.ok(spawns > 0, 'a moved tip spawns git');
+    // Detached HEAD: --abbrev-ref says HEAD; the sha is the commit itself.
+    g(dir, 'checkout', '-q', two);
+    await same('detached HEAD');
+    g(dir, 'checkout', '-q', 'feat');
+    // A tag named like the branch: --abbrev-ref says `heads/feat`; the file read must defer to git.
+    g(dir, 'tag', 'feat');
+    assert.strictEqual(await core.currentBranch(dir), g(dir, 'rev-parse', '--abbrev-ref', 'HEAD'), 'tag/branch name clash → same as git');
+    g(dir, 'tag', '-d', 'feat');
+    // Linked worktree: its HEAD lives in .git/worktrees/<name>, refs in the main .git.
+    g(dir, 'worktree', 'add', '-q', '-b', 'wtb', wt, 'master');
+    vs.workspace.workspaceFolders[0].uri.fsPath = wt;
+    await core.resolveRepoRoot();
+    assert.strictEqual(core.getCwd(), fs.realpathSync(wt), 'setup: cwd is the worktree');
+    spawns = 0;
+    assert.strictEqual(await core.currentBranch(wt), 'wtb', 'worktree: current branch from its own HEAD');
+    assert.strictEqual(spawns, 0, 'worktree: no spawn for the branch name');
+    assert.strictEqual(core.headRef()?.sha, g(wt, 'rev-parse', 'HEAD'), 'worktree: HEAD sha');
+    assert.strictEqual(core.refTip('refs/heads/feat'), g(wt, 'rev-parse', 'refs/heads/feat'), 'worktree: shared refs via commondir');
+    assert.strictEqual(await core.mergeBaseRef(wt, 'master'), g(wt, 'merge-base', 'master', 'HEAD'), 'worktree: merge-base');
+    // Unborn branch (fresh repo): no sha to read → falls back to git, which errors → '' as before.
+    const empty = path.join(root, 'empty');
+    g(root, 'init', '-q', '-b', 'master', empty);
+    vs.workspace.workspaceFolders[0].uri.fsPath = empty;
+    await core.resolveRepoRoot();
+    assert.strictEqual(core.headRef()?.sha, null, 'unborn: no sha');
+    assert.strictEqual(await core.currentBranch(empty), '', 'unborn: same answer as before (git errors → empty)');
+  } finally {
+    cp.execFile = origExecFile;
     restore();
     clean();
   }

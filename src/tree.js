@@ -161,7 +161,10 @@ class DiffTree {
   /** Refresh. One run at a time: a call while one is in flight shares a single follow-up run that
    *  starts when the current one ends (watcher bursts used to stack several concurrent runs). */
   load(rescanUntracked = false) {
-    if (rescanUntracked) this._untrackedStale = true;
+    if (rescanUntracked) {
+      this._untrackedStale = true;
+      core.resetMergeBaseMemo();
+    }
     if (!this._inflight) {
       this._inflight = this._load().finally(() => {
         this._inflight = null;

@@ -142,6 +142,59 @@ async function gitAddChunked(cwd, files) {
   for (let i = 0; i < files.length; i += 100) await git(cwd, ['add', '--', ...files.slice(i, i + 100)]);
 }
 
+// ---- Ref reads without a spawn ---------------------------------------------------------------
+// HEAD, loose refs and packed-refs are plain files. Reading them replaces `rev-parse --abbrev-ref
+// HEAD` on every refresh and lets the merge-base answer be cached by the tips it depends on.
+// Worktrees: HEAD sits in the worktree's own git dir, refs in the common dir (`commondir` file).
+// Anything unusual (unborn branch, symbolic loose ref, unreadable) → null → the git spawn as before.
+const SHA_RE = /^[0-9a-f]{40,64}$/;
+function commonDir() {
+  if (!gitDir) return null;
+  try {
+    return path.resolve(gitDir, fs.readFileSync(path.join(gitDir, 'commondir'), 'utf8').trim());
+  } catch {
+    return gitDir; // not a linked worktree
+  }
+}
+/** Sha of a full ref name (`refs/heads/x`, `refs/remotes/origin/x`): loose file first, then packed-refs. */
+function refTip(ref) {
+  const common = commonDir();
+  if (!common) return null;
+  try {
+    const s = fs.readFileSync(path.join(common, ref), 'utf8').trim();
+    return SHA_RE.test(s) ? s : null;
+  } catch {
+    // no loose file — packed below
+  }
+  try {
+    // ponytail: packed-refs is re-read per call (a few hundred KB at most, ms) — cache by mtime if it shows
+    for (const line of fs.readFileSync(path.join(common, 'packed-refs'), 'utf8').split('\n')) {
+      if (line[0] === '#' || line[0] === '^') continue;
+      const sp = line.indexOf(' ');
+      if (sp > 0 && line.slice(sp + 1).trim() === ref) return SHA_RE.test(line.slice(0, sp)) ? line.slice(0, sp) : null;
+    }
+  } catch {
+    // no packed-refs
+  }
+  return null;
+}
+/** .git/HEAD → { branch, sha, detached }: branch = short name when HEAD is a `refs/heads/` ref (else
+ *  null), sha = the commit (null when unborn), detached = HEAD holds a bare sha. null when there is
+ *  no repo to read. Only valid for the resolved repo (`cwd === getCwd()`). */
+function headRef() {
+  if (!gitDir) return null;
+  try {
+    const s = fs.readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+    if (s.startsWith('ref: ')) {
+      const ref = s.slice(5).trim();
+      return { branch: ref.startsWith('refs/heads/') ? ref.slice(11) : null, sha: refTip(ref), detached: false };
+    }
+    return SHA_RE.test(s) ? { branch: null, sha: s, detached: true } : null;
+  } catch {
+    return null;
+  }
+}
+
 // Resolve the ref to diff against: the merge-base of `base` and HEAD, NOT base's tip. This matches
 // GitHub's "files changed" (only what this branch added since it forked) — diffing against the tip
 // of a base that has since advanced would wrongly include every file the base moved ahead on.
@@ -153,6 +206,19 @@ async function gitAddChunked(cwd, files) {
  *  contains the other, rare) → origin, logged. Cached by the pair, so the ancestor check only
  *  reruns when a merge-base moves. */
 const mergeBaseCache = new Map(); // base → { key: 'mbLocal\nmbOrigin', ref }
+let mergeBaseMemo = null; // { key: base + HEAD + base tip + origin tip, ref } — a hit costs no spawn at all
+/** Forget the memoized merge-base (the Refresh button): `git replace` / grafts move it without moving a tip. */
+function resetMergeBaseMemo() {
+  mergeBaseMemo = null;
+}
+function shallowStamp() {
+  // A shallow clone's merge-base moves on --deepen/--unshallow with every tip unchanged: key on that file.
+  try {
+    return String(fs.statSync(path.join(commonDir(), 'shallow')).mtimeMs);
+  } catch {
+    return '';
+  }
+}
 async function mergeBaseOf(cwd, ref) {
   try {
     return (await git(cwd, ['merge-base', ref, 'HEAD'])).trim() || null;
@@ -170,6 +236,19 @@ async function isAncestor(cwd, a, b) {
 }
 async function mergeBaseRef(cwd, base) {
   if (!base) return base;
+  // The answer is a function of HEAD and the two tips: while those files read the same, reuse it.
+  // Not memoized when a tip can't be read (unborn, tag/sha base) — git decides every time then.
+  const head = cwd === getCwd() ? headRef()?.sha : null;
+  const remote = base.startsWith('origin/');
+  const tip = base === 'HEAD' ? head : refTip(remote ? `refs/remotes/${base}` : `refs/heads/${base}`);
+  const originTip = base === 'HEAD' || remote ? '' : refTip(`refs/remotes/origin/${base}`) ?? '';
+  const key = head && tip ? `${cwd}\n${base}\n${head}\n${tip}\n${originTip}\n${shallowStamp()}` : null;
+  if (key && mergeBaseMemo?.key === key) return mergeBaseMemo.ref;
+  const ref = await computeMergeBaseRef(cwd, base);
+  if (key) mergeBaseMemo = { key, ref };
+  return ref;
+}
+async function computeMergeBaseRef(cwd, base) {
   const local = await mergeBaseOf(cwd, base);
   if (base === 'HEAD' || base.startsWith('origin/')) return local || base;
   const origin = await mergeBaseOf(cwd, `origin/${base}`);
@@ -217,6 +296,6 @@ async function detectGh(cwd) {
 
 module.exports = {
   FOLDER_KEY, workspaceFolderPath, getCwd, gitDirPath, resolveRepoRoot, watchGitDir, isSelfIndexWrite,
-  git, gitStdin, gitBlobBytes, gitAddChunked, mergeBaseRef,
+  git, gitStdin, gitBlobBytes, gitAddChunked, mergeBaseRef, resetMergeBaseMemo, headRef, refTip,
   gh, ghAvailable, prEnabled, updatePrMode, detectGh,
 };

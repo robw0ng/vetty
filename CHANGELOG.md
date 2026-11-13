@@ -11,6 +11,9 @@
   diffs behind the staged/edited markers. A burst of changes runs one refresh at a time with a
   single follow-up instead of several overlapping ones. The listed files, order, counts and markers
   are unchanged (pinned by a fixture test against the old commands).
+- **No git spawn for the branch name or the merge-base on a quiet refresh** (VS Code): `.git/HEAD`,
+  loose refs and `packed-refs` are read directly (worktrees and a detached HEAD included), and the
+  merge-base answer is reused until HEAD, the base tip or `origin/<base>` moves.
 
 ## 0.0.119
 
