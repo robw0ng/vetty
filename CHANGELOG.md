@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.0.121
+
+- **Risk score per file in the guided review** (VS Code). The vetty-review skill now scores every
+  file `read` / `skim` / `skip` with a one-line reason; the Review row shows ❗ (read closely) or
+  ⚠️ (skim) in front of its `#n`, and the tooltip gives the reason. Old review files (no score) look
+  as before. Skill: `--risk-only` adds scores to an existing review without rewriting the notes.
+  Rider ignores the new fields (its order view is unchanged).
+
 ## 0.0.120
 
 - **Faster refresh on big repos** (VS Code). The untracked-file scan (the slowest git read, a full

@@ -12,6 +12,8 @@ const {
 } = core;
 
 const PAGE_SIZE = 500; // flat-view rows per group before a "Show more" row appears
+const RISK_LABEL = { read: 'Read closely', skim: 'Skim', skip: 'Skip' }; // Claude's per-file risk score (tooltip)
+const RISK_SIGN = { read: '❗ ', skim: '⚠️ ', skip: '' }; // in front of the #n on the row; skip/unscored show nothing
 
 // Line counts for untracked files, cached by (mtime, size) — refreshes fire every ~400ms, so
 // without the cache every untracked file would be re-read on each one. null = huge/binary/unreadable.
@@ -127,7 +129,7 @@ class DiffTree {
   }
 
   /** Guided Review steps: Claude's order restricted to files actually in this review (out-of-diff
-   *  and untracked-group entries dropped), renumbered 1..n so the #s have no gaps. Map rel → { n, note };
+   *  and untracked-group entries dropped), renumbered 1..n so the #s have no gaps. Map rel → { n, note, risk, riskWhy };
    *  empty while Guided Review is off. ponytail: recomputed per call — the order list is short. */
   steps() {
     const review = core.guidedReviewOn(this.context) ? core.claudeReview() : null;
@@ -136,7 +138,7 @@ class DiffTree {
     const present = new Set(this.files);
     const ignored = getIgnored(this.context, this.base);
     for (const [rel, e] of review.order)
-      if (present.has(rel) && !ignored.has(rel)) map.set(rel, { n: map.size + 1, note: e.note });
+      if (present.has(rel) && !ignored.has(rel)) map.set(rel, { n: map.size + 1, note: e.note, risk: e.risk, riskWhy: e.riskWhy });
     return map;
   }
 
@@ -573,6 +575,7 @@ class DiffTree {
     if (step) {
       md.appendMarkdown(`\n---\n\n**Guided #${step.n}**`);
       if (step.note) md.appendText(`  ·  ${step.note}`);
+      if (step.risk) md.appendMarkdown('\n\n').appendMarkdown(`**${RISK_LABEL[step.risk]}**`).appendText(step.riskWhy ? ` — ${step.riskWhy}` : '');
     } else if (!isIgnored && this.steps().size) {
       md.appendMarkdown('\n---\n\n_Not in guided review_ — re-run the annotation to cover this file.');
     }
@@ -602,9 +605,9 @@ class DiffTree {
     const rePart =
       !viewedNow && !isIgnored && reviewedBlob(getViewed(this.context, this.base), rel) ? '↻' : ''; // edited since viewed (tooltip explains)
     const wtPart = this.wtOnly?.has(rel) ? 'uncommitted' : ''; // not in the branch diff (tooltip explains)
-    // Claude's review order: `#n` + its one-line why, while the sort toggle is on.
+    // Claude's review order: `#n` (+ a risk sign in front) — its one-line why and the risk reason are in the tooltip.
     const step = this.steps().get(rel);
-    const stepPart = step ? `#${step.n}` : '';
+    const stepPart = step ? `${RISK_SIGN[step.risk] ?? ''}#${step.n}` : '';
     it.description = [stepPart, groupPart, matchPart, counts, wtPart, commentPart, rePart, dirPart]
       .filter(Boolean)
       .join('  ·  ');

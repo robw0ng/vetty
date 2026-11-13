@@ -67,12 +67,14 @@ paste back → the agent fixes exactly those → **since-last-review** shows you
 Ask any Claude Code session to **"annotate this branch for Vetty"**. It writes
 `<git-dir>/vetty/claude-review.json` (one per worktree, tied to the branch):
 
-- **order**: files in an intuitive review order, each with a one-line why.
+- **order**: files in an intuitive review order, each with a one-line why and a risk score
+  (`read` / `skim` / `skip`) with its reason.
 - **comments**: short context notes at specific lines (bullets, tables for state matrices).
 
 Vetty picks it up live. Turn on **Guided Review** (VS Code: Review view **⋯** menu; Rider: toolbar):
 
-- **On**: Unviewed/Viewed follow Claude's order, each row shows `#n` (the why is in its tooltip), `j`/`k` follow it,
+- **On**: Unviewed/Viewed follow Claude's order, each row shows `#n` with ❗ (read closely) or ⚠️ (skim) in
+  front (VS Code; the why and the risk reason are in its tooltip), `j`/`k` follow it,
   and Claude's notes appear inline and in the Comments sidebar as read-only "Claude" threads.
 - **Off**: regular path order, and Claude's notes are hidden.
 

@@ -1,6 +1,6 @@
 ---
 name: vetty-review
-description: Annotate the current branch (or just the changes since the last commit, per Vetty's Range mode) for review in Vetty (VS Code / Rider) — write an intuitive file review order plus short inline context notes, citing the existing code each change follows as precedent, that Vetty shows in the editor and its sidebar. Use when the user says "annotate for vetty", "vetty walkthrough", "review order for vetty", "add vetty comments", "explain these changes in vetty", or asks for a guided review of their branch's changes.
+description: Annotate the current branch (or just the changes since the last commit, per Vetty's Range mode) for review in Vetty (VS Code / Rider) — write an intuitive file review order plus short inline context notes, citing the existing code each change follows as precedent, that Vetty shows in the editor and its sidebar. Use when the user says "annotate for vetty", "vetty walkthrough", "review order for vetty", "add vetty comments", "explain these changes in vetty", or asks for a guided review of their branch's changes; also "--risk-only" / "just score the risk" to add risk scores to an existing review.
 ---
 
 # Vetty review annotations
@@ -8,6 +8,7 @@ description: Annotate the current branch (or just the changes since the last com
 Vetty reads one file per git worktree and shows it live:
 
 - **order** → with **Guided Review** on, the Review list follows this order. Rows show `#n`; your note is the row tooltip.
+  Each entry's **risk** (`read` / `skim` / `skip`) tells the reader how closely to read the file; its `riskWhy` is in the tooltip.
 - **comments** → with Guided Review on, read-only "Claude" notes inline at the line and in the Comments sidebar.
 
 Notes are context for the reader, not change requests. They never block staging.
@@ -72,9 +73,9 @@ Create the `vetty` dir if missing. Overwrite the whole file each time (UTF-8 JSO
   "head": "3f2a9c1e0d…(full sha from git rev-parse HEAD)",
   "writtenAt": "2026-09-29T15:04:05Z",
   "order": [
-    { "file": "src/auth/limits.ts", "note": "new limiter state + config" },
-    { "file": "src/auth/login.ts", "note": "wires limiter into login" },
-    "src/auth/login.test.ts"
+    { "file": "src/auth/limits.ts", "note": "new limiter state + config", "risk": "read", "riskWhy": "shared by login and password reset; runs with the feature flag off" },
+    { "file": "src/auth/login.ts", "note": "wires limiter into login", "risk": "skim", "riskWhy": "one call added, behind the flag" },
+    { "file": "src/auth/login.test.ts", "risk": "skip", "riskWhy": "tests" }
   ],
   "comments": [
     {
@@ -98,7 +99,8 @@ Create the `vetty` dir if missing. Overwrite the whole file each time (UTF-8 JSO
 - Paths: repo-root-relative, forward slashes.
 - `line` / `endLine`: 1-based, in the **current working-tree** file. `endLine` optional.
 - `anchor`: exact text of `line`, trimmed. Vetty uses it to re-find the line if code moves. Always include it.
-- `order` entries: a path string, or `{ file, note }`. List **every** file in scope, once. Unlisted ones sort after, unnumbered.
+- `order` entries: a path string, or `{ file, note, risk, riskWhy }`. List **every** file in scope, once. Unlisted ones sort after, unnumbered.
+- `risk`: `"read"`, `"skim"` or `"skip"` on every entry (see §3a); `riskWhy`: one plain line. Missing = unscored (Vetty shows the number as before).
 - `kind`: `"big-picture"` on each file's role note; omit it on detail notes.
 - `branch`: copy it from `scope.json`. Vetty hides the file on other branches.
 - `head`: full sha of `git rev-parse HEAD`; `writtenAt`: current time, ISO 8601 UTC. Vetty uses them to
@@ -115,6 +117,39 @@ Order so each file only depends on what came before it:
 5. Tests last (they read best once the code is known). Generated / lockfiles at the very end.
 
 `note`: ≤ 8 words. Say what this file contributes — `adds retry state`, `calls limiter on login`.
+
+## 3a. Risk — score every file
+
+Order is dependency order; risk is a second signal on top of it: how closely this file needs reading.
+Score **every** entry.
+
+| risk | meaning |
+|---|---|
+| `read` | read every line — a mistake here is costly or hard to see |
+| `skim` | read the shape, trust the detail |
+| `skip` | nothing to judge by eye |
+
+Raises the score: code shared with other features; code that runs even with the feature flag off;
+money, permissions or security checks; state machines and offline/sync queues; files with many
+callers; departures from precedent (see "Find precedent").
+
+Lowers it: generated code; route stubs; pass-through props; tests; i18n strings; pure UI that has
+already been design-audited.
+
+`riskWhy` is one plain line in the notes' voice, concrete, not a category name. For every `read`
+file it names the actual reason: the flag-off path, the N callers, the shared screen.
+
+- Good: `runs on every checkout, flag or not`, `12 callers across billing and reports`, `same screen the invoice list uses`.
+- Bad: `important`, `high risk`, `core logic`.
+
+### `--risk-only`
+
+The user says `--risk-only` (or asks to "just score the risk"): read the existing
+`claude-review.json`, add or update `risk` + `riskWhy` on each `order` entry, and write it back with
+**the same content otherwise** (re-serialised is fine): notes, comments, `head` and entry order
+unchanged; set `writtenAt` to now so Vetty's "ago" reflects the pass.
+Entries not in the file are not added (re-run the full skill for that). No file yet → tell the user
+and stop. Report how many entries were scored and how many are `read`.
 
 ## 4. Comments — short, concise, explain well
 
@@ -246,10 +281,10 @@ Bad: `This function sets up a listener that listens for file changes and then ca
 
 ## 5. Finish
 
-Check before writing: every non-deleted file in `scope.json` has a big-picture note, every
+Check before writing: every `order` entry has a `risk` and every `read` one a concrete `riskWhy`, every non-deleted file in `scope.json` has a big-picture note, every
 non-trivial changed block has a block note, everything a big-picture note names that lives in the
 same file has a follow-up note at its line, no note just restates its code, every `order` entry and
 note path is in `scope.json`, and each new pattern names its precedent (or says none).
 
-Tell the user in one or two lines: the mode (whole branch / since last commit), how many files were ordered, how many notes you wrote, and that
+Tell the user in one or two lines: the mode (whole branch / since last commit), how many files were ordered (and how many are `read`), how many notes you wrote, and that
 they should turn on Vetty's **Guided Review** toggle to see it. Re-run to update; the file is replaced.

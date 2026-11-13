@@ -74,7 +74,7 @@ assert.deepStrictEqual(todos, [
   const { parseClaudeReview, removeClaudeComments, relocate } = require('../lib');
   const text = JSON.stringify({
     branch: 'feat',
-    order: ['src/a.js', { file: '.\\src\\b.js', note: 'callers' }, 'src/a.js'],
+    order: ['src/a.js', { file: '.\\src\\b.js', note: 'callers', risk: 'read', riskWhy: ' runs with the flag off ' }, 'src/a.js', { file: 'c.js', risk: 'bogus', riskWhy: 'x' }, { file: 'd.js', risk: 'skim' }, { file: 'e.js', risk: 1, riskWhy: 'n' }, { file: 'f.js', riskWhy: 'orphan' }],
     comments: [
       { file: 'src/a.js', line: 3, endLine: 5, anchor: '  const x = 1;  ', kind: 'big-picture', body: '- why' },
       { file: 'src/a.js', line: 0, body: 'bad line' },
@@ -83,7 +83,14 @@ assert.deepStrictEqual(todos, [
   });
   assert.strictEqual(parseClaudeReview(text, 'other'), null, 'other branch → hidden');
   const r = parseClaudeReview(text, 'feat');
-  assert.deepStrictEqual([...r.order], [['src/a.js', { i: 0, note: '' }], ['src/b.js', { i: 1, note: 'callers' }]]);
+  assert.deepStrictEqual([...r.order], [
+    ['src/a.js', { i: 0, note: '', risk: '', riskWhy: '' }],
+    ['src/b.js', { i: 1, note: 'callers', risk: 'read', riskWhy: 'runs with the flag off' }],
+    ['c.js', { i: 2, note: '', risk: '', riskWhy: '' }],
+    ['d.js', { i: 3, note: '', risk: 'skim', riskWhy: '' }],
+    ['e.js', { i: 4, note: '', risk: '', riskWhy: '' }],
+    ['f.js', { i: 5, note: '', risk: '', riskWhy: '' }],
+  ], 'risk kept when read/skim/skip, dropped (with its why) otherwise; missing = unscored');
   assert.deepStrictEqual(r.comments, [{ file: 'src/a.js', line: 2, endLine: 4, anchor: 'const x = 1;', body: '- why', big: true }]);
   assert.strictEqual(parseClaudeReview('{nope', 'feat'), null, 'garbage → null');
   const left = JSON.parse(removeClaudeComments(text, r.comments)).comments;
