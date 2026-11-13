@@ -132,6 +132,8 @@ Score **every** entry.
 Raises the score: code shared with other features; code that runs even with the feature flag off;
 money, permissions or security checks; state machines and offline/sync queues; files with many
 callers; departures from precedent (see "Find precedent").
+"Raises" applies where the value is **decided or checked** (a condition, a default, a mapping that
+could change it); a file that only passes a money/permission/security value through with no logic is at most `skim`.
 
 Lowers it: generated code; route stubs; pass-through props; tests; i18n strings; pure UI that has
 already been design-audited.
@@ -147,7 +149,9 @@ file it names the actual reason: the flag-off path, the N callers, the shared sc
 The user says `--risk-only` (or asks to "just score the risk"): read the existing
 `claude-review.json`, add or update `risk` + `riskWhy` on each `order` entry, and write it back with
 **the same content otherwise** (re-serialised is fine): notes, comments, `head` and entry order
-unchanged; set `writtenAt` to now so Vetty's "ago" reflects the pass.
+unchanged; set `writtenAt` to now so Vetty's "ago" reflects the pass. Keep `head` as it was: if it
+is not the current `git rev-parse HEAD`, the notes predate later commits — say so in the report
+and offer a full re-run; never rewrite the notes in this mode.
 Entries not in the file are not added (re-run the full skill for that). No file yet → tell the user
 and stop. Report how many entries were scored and how many are `read`.
 
